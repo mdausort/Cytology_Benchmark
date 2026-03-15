@@ -1,3 +1,3 @@
-# A Comprehensive Benchmark of Foundation Models Fine-Tuning for Cytological Image Classification [Submitted to SPIE Special Issue " "]
+# A Comprehensive Benchmark of Foundation Models Fine-Tuning for Cytological Image Classification
 
-Currently being updated
+**Currently being updated**
