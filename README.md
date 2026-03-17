@@ -23,7 +23,7 @@
 3. Clone the GitHub repository
    ```bash
    pip3 install torch==2.2.2 torchaudio==2.2.2 torchvision==0.17.2
-   git clone https://github.com/mdausort/Cytology-fine-tuning.git
+   git clone https://github.com/mdausort/Cytology_Benchmark.git
    ```
    After that, run pip install -r requirements.txt under CoOp/ to install a few more packages required by CLIP.
   
