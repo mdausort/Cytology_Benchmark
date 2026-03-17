@@ -48,5 +48,3 @@
 | HiCervix       | [📥 Link](https://zenodo.org/records/11087263)                                                          |
 | MLCC           | [📥 Link](https://www.kaggle.com/datasets/blank1508/mendeley-lbc-cervical-cancer-)                      |
 | SIPaKMeD       | [📥 Link](https://www.kaggle.com/datasets/prahladmehandiratta/cervical-cancer-largest-dataset-sipakmed) |
-
-3. 
