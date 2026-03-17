@@ -13,25 +13,28 @@
 📌 **NB:** The Python version used is 3.9.13.
 
 1. Create a virtual environment
+   This code is built on top of the awesome toolbox [Dassl.pytorch](https://github.com/KaiyangZhou/Dassl.pytorch) so you need to install the dassl environment first. Simply follow the instructions described here to install dassl as well as PyTorch.
+
+2. Activate the environment
    ```bash
-   python3 -m venv cyto_ft_venv
-   source cyto_ft_venv/bin/activate
+   source /env/dassl/bin/activate
    ```
 
-   Clone the GitHub repository
+3. Clone the GitHub repository
    ```bash
    pip3 install torch==2.2.2 torchaudio==2.2.2 torchvision==0.17.2
    git clone https://github.com/mdausort/Cytology-fine-tuning.git
    ```
-   
-   Install the required packages
+   After that, run pip install -r requirements.txt under CoOp/ to install a few more packages required by CLIP.
+  
+4. Install the required packages
    ```bash
    cd Cytology-fine-tuning
    pip3 install -r requirements.txt
    ```
 
 
-2. Datasets downloads:
+3. Datasets downloads:
 
 | Dataset        | 🔗 Download Link                                                                                        |
 | -------------- | -------------------------------------------------------------------------------------------------------- |
@@ -46,3 +49,4 @@
 | MLCC           | [📥 Link](https://www.kaggle.com/datasets/blank1508/mendeley-lbc-cervical-cancer-)                      |
 | SIPaKMeD       | [📥 Link](https://www.kaggle.com/datasets/prahladmehandiratta/cervical-cancer-largest-dataset-sipakmed) |
 
+3. 
