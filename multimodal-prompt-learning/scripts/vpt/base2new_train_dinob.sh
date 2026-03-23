@@ -1,0 +1,98 @@
+#!/bin/bash
+#SBATCH --job-name=vpt
+#SBATCH --cpus-per-task=4
+#SBATCH --ntasks=1
+#SBATCH --mem=64G
+#SBATCH --partition=gpu
+#SBATCH --gpus=1
+#SBATCH --time=00:15:00
+#SBATCH --output="/gpfs/projects/acad/coalap/mdausort/ISBI_sup/logs/vpt_%A_%a.out"
+#SBATCH --error="/gpfs/projects/acad/coalap/mdausort/ISBI_sup/logs/vpt_%A_%a.err"
+#SBATCH --account=danitim
+#SBATCH --array=0-449%100
+
+set -euo pipefail
+
+# 1) activate your venv
+source /gpfs/home/acad/ucl-elen/mdausort/env/dassl/bin/activate
+
+# 2) go to the repo
+cd /gpfs/projects/acad/coalap/mdausort/ISBI_sup/multimodal-prompt-learning
+
+
+# IMPORTANT: forcer le code local si besoin
+export PYTHONPATH="$PWD:$PWD/Dassl.pytorch:$PYTHONPATH"
+
+# 3) custom config
+DATA=/gpfs/home/acad/ucl-elen/mdausort/data/
+TRAINER=IVLP
+
+# 4) grids (arrays)
+DATASETS=(apacc bcfc bloodmnist bmcd bmt fnac2019 herlev hicervix mlcc sipakmed)
+CFGS=(4 8 16)
+SHOTS_LIST=(1 2 4 8 16)
+SEEDS=(1 2 3)
+
+# 5) compute combination from SLURM_ARRAY_TASK_ID
+nd=${#DATASETS[@]}
+nc=${#CFGS[@]}
+ns=${#SHOTS_LIST[@]}
+nse=${#SEEDS[@]}
+
+total=$((nd * nc * ns * nse))
+
+OFFSET=0
+tid=$((SLURM_ARRAY_TASK_ID + OFFSET))
+
+if (( tid < 0 || tid >= total )); then
+    echo "Error: SLURM_ARRAY_TASK_ID=$tid out of range [0, $((total-1))]"
+    exit 1
+fi
+
+# 6) order: dataset -> cfg -> shots -> seed  (same nesting as your for-loops)
+seed_idx=$(( tid % nse ))
+tmp=$(( tid / nse ))
+
+shots_idx=$(( tmp % ns ))
+tmp=$(( tmp / ns ))
+
+cfg_idx=$(( tmp % nc ))
+dataset_idx=$(( tmp / nc ))
+
+DATASET=${DATASETS[$dataset_idx]}
+N_CTX_VISION=${CFGS[$cfg_idx]}
+SHOTS=${SHOTS_LIST[$shots_idx]}
+SEED=${SEEDS[$seed_idx]}
+
+PROMPT_DEPTH_TEXT=0
+PROMPT_DEPTH_VISION=12
+N_CTX_TEXT=4
+
+DIR=/gpfs/projects/acad/coalap/mdausort/ISBI_sup/output/${DATASET}/${TRAINER}/dinobloom-s/${SHOTS}shots/${N_CTX_VISION}nctxv_dv${PROMPT_DEPTH_VISION}/seed${SEED}
+LOGFILE="${DIR}/log.txt"
+
+echo "Task ${tid}/${total}: DATASET=${DATASET} CFG=dinobloom-s SHOTS=${SHOTS} SEED=${SEED}"
+echo "Output dir: ${DIR}"
+
+# 6) skip if already done
+if [[ -f "${LOGFILE}" ]]; then
+    echo "SKIP: log exists -> ${LOGFILE}"
+    exit 0
+fi
+
+mkdir -p "${DIR}"
+
+python train.py \
+  --root ${DATA} \
+  --seed ${SEED} \
+  --trainer ${TRAINER} \
+  --dataset-config-file configs/datasets/${DATASET}.yaml \
+  --config-file configs/trainers/${TRAINER}/dinobloom-s.yaml \
+  --output-dir ${DIR} \
+  TRAINER.IVLP.N_CTX_VISION ${N_CTX_VISION} \
+  TRAINER.IVLP.N_CTX_TEXT ${N_CTX_TEXT} \
+  TRAINER.IVLP.PROMPT_DEPTH_VISION ${PROMPT_DEPTH_VISION} \
+  TRAINER.IVLP.PROMPT_DEPTH_TEXT ${PROMPT_DEPTH_TEXT} \
+  DATASET.NUM_SHOTS ${SHOTS} \
+  DATASET.SUBSAMPLE_CLASSES all \
+  TRAINER.IVLP.MODE vision-only
