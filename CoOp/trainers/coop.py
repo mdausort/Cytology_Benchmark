@@ -5,13 +5,13 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.cuda.amp import GradScaler, autocast
 
-from dassl.engine import TRAINER_REGISTRY, TrainerX  # type: ignore
-from dassl.metrics import compute_accuracy  # type: ignore
-from dassl.utils import load_pretrained_weights, load_checkpoint  # type: ignore
-from dassl.optim import build_optimizer, build_lr_scheduler  # type: ignore
+from dassl.engine import TRAINER_REGISTRY, TrainerX
+from dassl.metrics import compute_accuracy
+from dassl.utils import load_pretrained_weights, load_checkpoint
+from dassl.optim import build_optimizer, build_lr_scheduler
 
 from clip import clip
-from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer  # type: ignore
+from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 from open_clip import get_tokenizer, create_model_from_pretrained
 from transformers import CLIPModel, CLIPTokenizerFast
 import conch.open_clip_custom
@@ -26,7 +26,6 @@ def count_params(model: nn.Module):
 
 
 def count_params_by_module(model: nn.Module, key="prompt_learner"):
-    # utile pour vérifier que seul prompt_learner est entraîné
     sub = dict(model.named_modules()).get(key, None)
     if sub is None:
         return None
@@ -35,310 +34,9 @@ def count_params_by_module(model: nn.Module, key="prompt_learner"):
     return total, trainable
 
 
-def _get_vision_weight_ref(m: nn.Module) -> torch.Tensor:
-    """
-    Retourne un poids de référence du backbone vision (pour dtype/device),
-    quel que soit le wrapper (OpenAI, open_clip, HF, etc.).
-    """
-    # 1) OpenAI CLIP / Quilt open_clip: image_encoder est un nn.Module (visual)
-    if hasattr(m, "image_encoder") and isinstance(m.image_encoder, nn.Module):
-        enc = m.image_encoder
-        if hasattr(enc, "conv1") and hasattr(enc.conv1, "weight"):
-            return enc.conv1.weight
-        return next(enc.parameters())
-
-    # 2) BiomedCLIP open_clip: encode_image est une fonction, vision est dans biomed.visual
-    if hasattr(m, "biomed"):
-        vision = getattr(m.biomed, "visual", None)
-        if isinstance(vision, nn.Module):
-            if hasattr(vision, "conv1") and hasattr(vision.conv1, "weight"):
-                return vision.conv1.weight
-            return next(vision.parameters())
-
-    # 3) Conch/open_clip: clip_model a souvent .visual
-    if hasattr(m, "clip_model"):
-        cm = m.clip_model
-        vision = getattr(cm, "visual", None)
-        if isinstance(vision, nn.Module):
-            if hasattr(vision, "conv1") and hasattr(vision.conv1, "weight"):
-                return vision.conv1.weight
-            return next(vision.parameters())
-        # HF transformers CLIP: vision_model
-        vision = getattr(cm, "vision_model", None)
-        if isinstance(vision, nn.Module):
-            return next(vision.parameters())
-
-    raise RuntimeError("Could not find a vision module to infer dtype/device.")
-
-
-def debug_one_update_step(trainer, batch):
-    import torch
-    from torch.nn import functional as F
-
-    model = trainer.model
-    model.train()
-
-    # mini optim juste pour le sanity check (n'affecte pas trainer.optim)
-    optim = torch.optim.SGD(model.prompt_learner.parameters(), lr=1e-1)
-
-    img, label = trainer.parse_batch_train(batch)
-    with torch.no_grad():
-        m = model.module if hasattr(model, "module") else model
-        vision = getattr(m, "image_encoder", None)
-        if vision is not None and hasattr(vision, "conv1"):
-            img = img.to(dtype=vision.conv1.weight.dtype)
-
-    # snapshot ctx avant
-    ctx0 = model.prompt_learner.ctx.detach().clone()
-
-    # forward/backward
-    optim.zero_grad(set_to_none=True)
-    out = model(img)
-    loss = F.cross_entropy(out, label)
-    loss.backward()
-
-    # stats grad
-    g = model.prompt_learner.ctx.grad
-    g_mean = None if g is None else g.abs().mean().item()
-    g_max = None if g is None else g.abs().max().item()
-
-    # step
-    optim.step()
-
-    # snapshot ctx après
-    ctx1 = model.prompt_learner.ctx.detach().clone()
-
-    # mesure changement
-    delta = (ctx1 - ctx0).abs()
-    print("\n" + "=" * 80)
-    print("🧪 ONE UPDATE STEP CHECK")
-    print("loss:", float(loss.item()))
-    print("grad ctx mean/max:", g_mean, g_max)
-    print("ctx change mean/max:", delta.mean().item(), delta.max().item())
-    print("ctx norm before/after:", ctx0.norm().item(), ctx1.norm().item())
-
-    # assertions robustes
-    assert g is not None and g.abs().sum().item() > 0, "❌ ctx grad is zero/None"
-    assert delta.sum().item() > 0, "❌ ctx did not change after optimizer.step()"
-    print("✅ ctx updates correctly")
-    print("=" * 80 + "\n")
-
-
-def debug_sanity_check(trainer, batch):
-    import torch
-    from torch.nn import functional as F
-
-    print("\n" + "=" * 80)
-    print("🔍 SANITY CHECK CoOp")
-    print("=" * 80)
-
-    model = trainer.model
-
-    # --------------------------------------------------
-    # 1) Backbone
-    # --------------------------------------------------
-    print("\n[1] Model type")
-    print("Model class:", type(model))
-    is_biomed = isinstance(model, CustomBiomedCLIP)
-    is_quilt = isinstance(model, CustomQuiltCLIP)
-    is_pubmed = isinstance(model, CustomPubMedCLIP)
-    is_conch = isinstance(model, CustomConchCLIP)
-    is_openai = isinstance(model, CustomCLIP)
-
-    if is_biomed:
-        print("→ Using BiomedCLIP backbone")
-    elif is_quilt:
-        print("→ Using Quilt/OpenCLIP backbone")
-    elif is_pubmed:
-        print("→ Using PubMedCLIP (HF transformers) backbone")
-    elif is_conch:
-        print("→ Using Conch backbone")
-    else:
-        print("→ Using OpenAI CLIP backbone")
-
-    # --------------------------------------------------
-    # 2) Trainable params
-    # --------------------------------------------------
-    print("\n[2] Trainable parameters")
-    trainable = [n for n, p in model.named_parameters() if p.requires_grad]
-    frozen = [n for n, p in model.named_parameters() if not p.requires_grad]
-    print(f"Trainable params ({len(trainable)}):")
-    for n in trainable:
-        print("  ✔", n)
-    print(f"Frozen params ({len(frozen)}): (not listed, OK)")
-
-    assert all(
-        "prompt_learner" in n for n in trainable
-    ), "❌ ERROR: non-prompt parameters are trainable!"
-
-    # --------------------------------------------------
-    # 3) logit_scale
-    # --------------------------------------------------
-    print("\n[3] logit_scale")
-    logit_scale = getattr(model, "logit_scale", None)
-    print("logit_scale:", logit_scale)
-    if logit_scale is not None:
-        try:
-            print("  value:", logit_scale.exp().item())
-        except Exception:
-            pass
-
-    # --------------------------------------------------
-    # 4) Forward / grads sanity
-    # --------------------------------------------------
-    print("\n[4] Forward pass")
-    model.zero_grad(set_to_none=True)
-    model.train()
-
-    img, label = trainer.parse_batch_train(batch)
-
-    with torch.no_grad():
-        m = model.module if hasattr(model, "module") else model
-        w = _get_vision_weight_ref(m)
-        print(
-            "[SANITY] img:",
-            img.device,
-            img.dtype,
-            "| vision weight:",
-            w.device,
-            w.dtype,
-        )
-        img = img.to(device=w.device, dtype=w.dtype)
-
-    # --- Token ids pour classes (n_cls, L)
-    tok = None
-    if hasattr(model, "tokenized_prompts"):
-        tok = model.tokenized_prompts.to(img.device)
-
-    # === TEXT PATH CHECK ===
-    if is_quilt:
-        # ✅ chemin réel Quilt/OpenCLIP: hook injection
-        tf = model.encode_text_with_ctx(tok)
-        print("tf_hook.requires_grad:", tf.requires_grad)
-
-        g = torch.autograd.grad(
-            tf.sum(), model.prompt_learner.ctx, retain_graph=True, allow_unused=True
-        )[0]
-        print("g is None:", g is None)
-        if g is not None:
-            print("g absmean/max:", g.abs().mean().item(), g.abs().max().item())
-
-    elif is_openai:
-        # ✅ chemin OpenAI CLIP (text_encoder existe)
-        prompts = model.prompt_learner()
-        tf = model.text_encoder(prompts, tok)
-        print("tf_custom.requires_grad:", tf.requires_grad)
-
-        g = torch.autograd.grad(
-            tf.sum(), model.prompt_learner.ctx, retain_graph=True, allow_unused=True
-        )[0]
-        print("g is None:", g is None)
-        if g is not None:
-            print("g absmean/max:", g.abs().mean().item(), g.abs().max().item())
-
-    elif is_biomed:
-        # BiomedCLIP: ton text_encoder prend des tokenized dict/tensor,
-        # et ctx est injecté via inputs_embeds.
-        ids = model.tokenized_prompts.to(img.device)
-        tf = model.encode_text_with_ctx(ids)
-        print("biomed tf:", tf.shape, tf.dtype, tf.device)
-
-        g = torch.autograd.grad(
-            tf.sum(), model.prompt_learner.ctx, retain_graph=True, allow_unused=True
-        )[0]
-
-        print("g is None:", g is None)
-        if g is not None:
-            print("g absmean/max:", g.abs().mean().item(), g.abs().max().item())
-
-    elif is_pubmed:
-        # ✅ CoOp-like: on encode le texte à partir des prompts embeddings
-        tf = model.encode_text_with_ctx(tok)  # (n_cls, dim)
-        print("tf_pubmed.requires_grad:", tf.requires_grad)
-        print("tf shape:", tf.shape)
-
-        if tf.size(0) >= 2:
-            print(
-                "cos(tf0, tf1):",
-                torch.nn.functional.cosine_similarity(tf[0:1], tf[1:2]).item(),
-            )
-            print("l2(tf0-tf1):", (tf[0] - tf[1]).norm().item())
-
-        # token ids des prompts (pour debug)
-        ids = model.tokenized_prompts.to(img.device)  # (n_cls, L)
-        am = model.attention_mask.to(img.device)  # (n_cls, L)
-        for i in range(min(2, ids.size(0))):
-            L = int(am[i].sum().item())
-            print(
-                i,
-                "decoded:",
-                repr(model.tokenizer.decode(ids[i][:L], skip_special_tokens=False)),
-            )
-
-        g = torch.autograd.grad(
-            tf.sum(), model.prompt_learner.ctx, retain_graph=True, allow_unused=True
-        )[0]
-        print("g is None:", g is None)
-        if g is not None:
-            print("g absmean/max:", g.abs().mean().item(), g.abs().max().item())
-
-    elif is_conch:
-        tok = model.tokenized_prompts.to(img.device)
-        tf = model.encode_text_with_ctx(tok)
-        print("tf_conch.requires_grad:", tf.requires_grad)
-        g = torch.autograd.grad(
-            tf.sum(), model.prompt_learner.ctx, retain_graph=True, allow_unused=True
-        )[0]
-        print("g is None:", g is None)
-        if g is not None:
-            print("g absmean/max:", g.abs().mean().item(), g.abs().max().item())
-
-    # === LOGITS SENSITIVITY CHECK ===
-    out1 = model(img)
-
-    with torch.no_grad():
-        model.prompt_learner.ctx.add_(0.1 * torch.randn_like(model.prompt_learner.ctx))
-
-    out2 = model(img)
-    print("mean|logits2-logits1|:", (out2 - out1).abs().mean().item())
-
-    print("Logits:", out1.shape, out1.dtype, out1.device)
-    assert out1.shape[0] == img.shape[0], "❌ Batch size mismatch"
-    assert out1.shape[1] == trainer.dm.num_classes, "❌ Num classes mismatch"
-
-    # --------------------------------------------------
-    # 5) Loss + backward
-    # --------------------------------------------------
-    print("\n[5] Loss + backward")
-    loss = F.cross_entropy(out1, label)
-    print("Loss:", loss.item())
-    loss.backward()
-
-    # --------------------------------------------------
-    # 6) Gradients check
-    # --------------------------------------------------
-    print("\n[6] Gradient check (should be ONLY prompt_learner)")
-    for name, p in model.named_parameters():
-        if p.requires_grad:
-            if p.grad is None:
-                print(f"  {name}: grad None ❌")
-            else:
-                print(
-                    f"  {name}: grad mean={p.grad.abs().mean():.6f} max={p.grad.abs().max():.6e}"
-                )
-        else:
-            if p.grad is not None:
-                print(f"❌ ERROR: frozen param has grad → {name}")
-
-    print("\n✅ SANITY CHECK PASSED")
-    print("=" * 80 + "\n")
-
-
 def _vision_dtype_from_module(vision: torch.nn.Module) -> torch.dtype:
-    # OpenAI CLIP / ViT-like : conv1 existe
     if hasattr(vision, "conv1") and hasattr(vision.conv1, "weight"):
         return vision.conv1.weight.dtype
-    # fallback robuste
     return next(vision.parameters()).dtype
 
 
@@ -436,10 +134,10 @@ class TextEncoder(nn.Module):
         pos = self.positional_embedding.to(dtype=tr_dtype)
 
         x = prompts + pos
-        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = x.permute(1, 0, 2)
         x = x.to(dtype=tr_dtype)
         x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = x.permute(1, 0, 2)
         x = self.ln_final(x).to(dtype=tr_dtype)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
@@ -467,7 +165,6 @@ class PromptLearner(nn.Module):
         ), f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
 
         if ctx_init:
-            # use given words to initialize context vectors
             ctx_init = ctx_init.replace("_", " ")
             n_ctx = len(ctx_init.split(" "))
             prompt = clip.tokenize(ctx_init)
@@ -477,7 +174,6 @@ class PromptLearner(nn.Module):
             prompt_prefix = ctx_init
 
         else:
-            # random initialization
             if cfg.TRAINER.COOP.CSC:
                 print("Initializing class-specific contexts")
                 ctx_vectors = torch.empty(n_cls, n_ctx, ctx_dim, dtype=dtype)
@@ -490,7 +186,7 @@ class PromptLearner(nn.Module):
         print(f'Initial context: "{prompt_prefix}"')
         print(f"Number of context words (tokens): {n_ctx}")
 
-        self.ctx = nn.Parameter(ctx_vectors)  # to be optimized
+        self.ctx = nn.Parameter(ctx_vectors)
 
         classnames = [name.replace("_", " ") for name in classnames]
         name_lens = [len(_tokenizer.encode(name)) for name in classnames]
@@ -500,12 +196,12 @@ class PromptLearner(nn.Module):
         with torch.no_grad():
             embedding = clip_model.token_embedding(tokenized_prompts).type(dtype)
 
-        self.register_buffer("token_prefix", embedding[:, :1, :])  # SOS
-        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])  # CLS, EOS
+        self.register_buffer("token_prefix", embedding[:, :1, :])
+        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])
 
         self.n_cls = n_cls
         self.n_ctx = n_ctx
-        self.tokenized_prompts = tokenized_prompts  # torch.Tensor
+        self.tokenized_prompts = tokenized_prompts
         self.name_lens = name_lens
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
@@ -521,7 +217,7 @@ class PromptLearner(nn.Module):
             prompts = torch.cat(
                 [
                     prefix,  # (n_cls, 1, dim)
-                    ctx,  # (n_cls, n_ctx, dim)
+                    ctx,     # (n_cls, n_ctx, dim)
                     suffix,  # (n_cls, *, dim)
                 ],
                 dim=1,
@@ -584,28 +280,25 @@ class BiomedPromptLearner(nn.Module):
         device = next(biomed_model.parameters()).device
 
         n_cls = len(classnames)
-        n_ctx = cfg.TRAINER.COOP.N_CTX  # ou COOP.N_CTX si tu veux
+        n_ctx = cfg.TRAINER.COOP.N_CTX
         ctx_init = cfg.TRAINER.COOP.CTX_INIT
         dtype = word_embeddings.weight.dtype
         self.csc = cfg.TRAINER.COOP.CSC
 
-        # -------------------------
-        # 1) Init ctx (CTX_INIT ou random)
-        # -------------------------
         if ctx_init:
             ctx_init = ctx_init.replace("_", " ")
             n_ctx = len(ctx_init.split(" "))
 
-            tok = tokenizer([ctx_init])  # open_clip tokenizer -> Tensor (1, L)
+            tok = tokenizer([ctx_init])
             if isinstance(tok, dict):
                 tok = tok["input_ids"]
             tok = tok.to(device)
             ids = tok[0]
-            content = ids[1:]  # skip CLS
-            ids_ctx = content[:n_ctx]  # (n_ctx,)
+            content = ids[1:]
+            ids_ctx = content[:n_ctx]
 
             with torch.no_grad():
-                ctx_vectors = word_embeddings(ids_ctx).to(dtype)  # (n_ctx, H)
+                ctx_vectors = word_embeddings(ids_ctx).to(dtype)
             prompt_prefix = ctx_init
 
         else:
@@ -627,22 +320,22 @@ class BiomedPromptLearner(nn.Module):
         classnames = [name.replace("_", " ") for name in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]
 
-        tokenized_prompts = tokenizer(prompts)  # open_clip tokenizer
+        tokenized_prompts = tokenizer(prompts)
         if isinstance(tokenized_prompts, dict):
             tokenized_prompts = tokenized_prompts["input_ids"]
-        tokenized_prompts = tokenized_prompts.to(device)  # (n_cls, L)
+        tokenized_prompts = tokenized_prompts.to(device)
 
         self.tokenized_prompts = tokenized_prompts
 
         with torch.no_grad():
             embedding = word_embeddings(tokenized_prompts).type(dtype)
 
-        self.register_buffer("token_prefix", embedding[:, :1, :])  # SOS
-        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])  # CLS, EOS
+        self.register_buffer("token_prefix", embedding[:, :1, :])
+        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])
 
         self.n_ctx = n_ctx
         self.n_cls = n_cls
-        self.tokenized_prompts = tokenized_prompts  # torch.Tensor
+        self.tokenized_prompts = tokenized_prompts
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def forward(self, batch_size, device, dtype):
@@ -681,11 +374,8 @@ class QuiltPromptLearner(nn.Module):
         dtype = next(quilt_model.parameters()).dtype
 
         token_embedding = _get_openclip_token_embedding(quilt_model)
-        ctx_dim = token_embedding.weight.shape[1]  # robuste pour Quilt/open_clip
+        ctx_dim = token_embedding.weight.shape[1]
 
-        # -------------------------
-        # 1) Init ctx (CTX_INIT ou random)
-        # -------------------------
         if ctx_init:
             ctx_init = ctx_init.replace("_", " ")
             n_ctx = len(ctx_init.split(" "))
@@ -698,7 +388,7 @@ class QuiltPromptLearner(nn.Module):
                 tok = torch.as_tensor(tok)
 
             with torch.no_grad():
-                emb = token_embedding(tok).type(dtype)  # (1, L, dim)
+                emb = token_embedding(tok).type(dtype)
 
             ctx_vectors = emb[0, 1 : 1 + n_ctx, :].clone()
 
@@ -719,9 +409,6 @@ class QuiltPromptLearner(nn.Module):
         print(f'Initial context: "{prompt_prefix}"')
         print(f"Number of context words (tokens): {self.n_ctx}")
 
-        # -------------------------
-        # 2) Construire prompts par classe
-        # -------------------------
         classnames = [c.replace("_", " ") for c in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]
 
@@ -733,7 +420,7 @@ class QuiltPromptLearner(nn.Module):
         else:
             tokenized = torch.as_tensor(tokenized)
 
-        self.tokenized_prompts = tokenized  # (n_cls, L)
+        self.tokenized_prompts = tokenized
         with torch.no_grad():
             embedding = token_embedding(self.tokenized_prompts).type(dtype)
 
@@ -773,13 +460,9 @@ class ConchPromptLearner(nn.Module):
         n_ctx = cfg.TRAINER.COOP.N_CTX
         self.csc = cfg.TRAINER.COOP.CSC
 
-        # dim texte Conch = 768 (d'après ton print)
         ctx_dim = conch_model.text.ln_final.weight.shape[0]
         dtype = next(conch_model.parameters()).dtype
 
-        # -------------------------
-        # 1) init ctx
-        # -------------------------
         if ctx_init:
             ctx_init = ctx_init.replace("_", " ")
             n_ctx = len(ctx_init.split(" "))
@@ -793,12 +476,12 @@ class ConchPromptLearner(nn.Module):
                 return_tensors="pt",
             )[
                 "input_ids"
-            ]  # (1, 77)
+            ]
 
             with torch.no_grad():
-                emb = conch_model.text.token_embedding(tok).type(dtype)  # (1, 77, dim)
+                emb = conch_model.text.token_embedding(tok).type(dtype)
 
-            ctx_vectors = emb[0, 1 : 1 + n_ctx, :].clone()  # après BOS
+            ctx_vectors = emb[0, 1 : 1 + n_ctx, :].clone()
 
         else:
             n_ctx = n_ctx
@@ -820,9 +503,6 @@ class ConchPromptLearner(nn.Module):
         print(f'Initial context: "{prompt_prefix}"')
         print(f"Number of context words (tokens): {self.n_ctx}")
 
-        # -------------------------
-        # 2) tokenized prompts par classe
-        # -------------------------
         classnames = [c.replace("_", " ") for c in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]
 
@@ -834,8 +514,7 @@ class ConchPromptLearner(nn.Module):
             return_tensors="pt",
         )[
             "input_ids"
-        ]  # (n_cls, 77)
-
+        ]
         self.tokenized_prompts = tokenized
 
         with torch.no_grad():
@@ -843,10 +522,10 @@ class ConchPromptLearner(nn.Module):
                 dtype
             )
 
-        self.register_buffer("token_prefix", embedding[:, :1, :])  # BOS
+        self.register_buffer("token_prefix", embedding[:, :1, :])
         self.register_buffer(
             "token_suffix", embedding[:, 1 + self.n_ctx :, :]
-        )  # le reste
+        )
 
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
@@ -887,10 +566,10 @@ class HFPromptLearner(nn.Module):
                 return_tensors="pt",
             )[
                 "input_ids"
-            ]  # (1, L)
+            ]
 
             with torch.no_grad():
-                emb = self.token_embedding(tok)  # (1, L, hidden)
+                emb = self.token_embedding(tok)
 
             ctx_vectors = emb[0, 1 : 1 + n_ctx, :].clone()
 
@@ -907,7 +586,6 @@ class HFPromptLearner(nn.Module):
         print(f'HF Initial context: "{prompt_prefix}"')
         print(f"Number of context words (tokens): {n_ctx}")
 
-        # -------- 2) construire prompts string (EXACT CoOp) --------
         classnames = [c.replace("_", " ") for c in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]
 
@@ -918,8 +596,8 @@ class HFPromptLearner(nn.Module):
             max_length=77,
             return_tensors="pt",
         )
-        self.tokenized_prompts = tok_full["input_ids"]  # (n_cls, 77)
-        self.attention_mask = tok_full["attention_mask"]  # (n_cls, 77)
+        self.tokenized_prompts = tok_full["input_ids"]
+        self.attention_mask = tok_full["attention_mask"]
 
         with torch.no_grad():
             embedding = self.token_embedding(self.tokenized_prompts)
@@ -996,7 +674,6 @@ class CustomBiomedCLIP(nn.Module):
         self.logit_scale = getattr(self.biomed, "logit_scale", None)
 
     def encode_text_with_ctx(self, input_ids: torch.Tensor) -> torch.Tensor:
-        # input_ids: (n_cls, L)
         device = input_ids.device
         we = self.word_embeddings
 
@@ -1008,14 +685,12 @@ class CustomBiomedCLIP(nn.Module):
         n_ctx = ctx.size(1)
 
         def _inject_ctx(module, inp, out):
-            # out: (B, L, H)
             out = out.clone()
             out[:, 1 : 1 + n_ctx, :] = ctx.to(device=out.device, dtype=out.dtype)
             return out
 
         h = we.register_forward_hook(_inject_ctx)
         try:
-            # open_clip CustomTextCLIP -> encode_text fait: BERT -> pooler -> proj
             tf = self.biomed.encode_text(input_ids)
         finally:
             h.remove()
@@ -1092,13 +767,11 @@ class CustomQuiltCLIP(nn.Module):
         tokenized_prompts = self.tokenized_prompts.to(device)
         text_features = self.encode_text_with_ctx(tokenized_prompts)
 
-        # normalize
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-        # logits
         if self.logit_scale is None:
-            logit_scale = torch.tensor(1 / 0.07, device=device)  # constant
+            logit_scale = torch.tensor(1 / 0.07, device=device)
         else:
             logit_scale = self.logit_scale.exp()
 
@@ -1150,11 +823,9 @@ class CustomConchCLIP(nn.Module):
         tokenized_prompts = self.tokenized_prompts.to(device)
         text_features = self.encode_text_with_ctx(tokenized_prompts)
 
-        # normalize + logits
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-        # ---- logit scale ----
         if self.logit_scale is None:
             logit_scale = torch.tensor(
                 1 / 0.07, device=device, dtype=text_features.dtype
@@ -1173,16 +844,13 @@ class CustomPubMedCLIP(nn.Module):
         self.clip_model = clip_model
         self.tokenizer = tokenizer
 
-        # prompt learner HF (celui que tu as déjà)
         self.prompt_learner = HFPromptLearner(cfg, classnames, clip_model, tokenizer)
         self.tokenized_prompts = self.prompt_learner.tokenized_prompts
         self.attention_mask = self.prompt_learner.attention_mask
 
-        # HF CLIP
         self.token_embedding = clip_model.text_model.embeddings.token_embedding
         self.logit_scale = getattr(clip_model, "logit_scale", None)
 
-        # dtype vision (souvent float32)
         self.vision_dtype = next(self.clip_model.vision_model.parameters()).dtype
 
     def encode_text_with_ctx(self, tokenized_prompts):
@@ -1210,7 +878,6 @@ class CustomPubMedCLIP(nn.Module):
 
         h = self.token_embedding.register_forward_hook(_inject_ctx)
         try:
-            # HF CLIPModel: récupérer features texte "projetées" (dim CLIP)
             tf = self.clip_model.get_text_features(
                 input_ids=tokenized_prompts, attention_mask=attention_mask
             )
@@ -1228,11 +895,9 @@ class CustomPubMedCLIP(nn.Module):
         self.attention_mask = self.attention_mask.to(device)
         text_features = self.encode_text_with_ctx(tokenized_prompts)
 
-        # normalize + logits
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-        # ---- logit scale ----
         if self.logit_scale is None:
             logit_scale = torch.tensor(
                 1 / 0.07, device=device, dtype=text_features.dtype
@@ -1316,11 +981,6 @@ class CoOp(TrainerX):
         pl = count_params_by_module(m, "prompt_learner")
         if pl is not None:
             print(f"[PARAMS] prompt_learner total/trainable = {pl[0]:,} / {pl[1]:,}")
-
-        # Debug - sanity check
-        batch_debug = next(iter(self.train_loader_x))
-        debug_sanity_check(self, batch_debug)
-        debug_one_update_step(self, batch_debug)
 
         # NOTE: only give prompt_learner to the optimizer
         self.optim = build_optimizer(self.model.prompt_learner, cfg.OPTIM)

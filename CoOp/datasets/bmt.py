@@ -28,7 +28,6 @@ class BMT(DatasetBase):
         self.image_dir = os.path.join(self.dataset_dir, "images")
         self.splits_dir = os.path.join(self.dataset_dir, "splits")
 
-        # few-shot cache (optionnel)
         self.split_fewshot_dir = os.path.join(self.dataset_dir, "split_fewshot")
         os.makedirs(self.split_fewshot_dir, exist_ok=True)
 
@@ -36,7 +35,6 @@ class BMT(DatasetBase):
         val = self.read_txt_split(os.path.join(self.splits_dir, SPLIT_FILES["val"]))
         test = self.read_txt_split(os.path.join(self.splits_dir, SPLIT_FILES["test"]))
 
-        # few-shot (même logique que EuroSAT)
         num_shots = cfg.DATASET.NUM_SHOTS
         if num_shots >= 1:
             seed = cfg.SEED
@@ -70,7 +68,6 @@ class BMT(DatasetBase):
                 if not line:
                     continue
 
-                # ✅ robust: path may contain spaces; label is last token
                 try:
                     rel_impath, label_str = line.rsplit(maxsplit=1)
                     label = int(label_str)

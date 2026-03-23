@@ -4,13 +4,13 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from dassl.engine import TRAINER_REGISTRY, TrainerX  # type: ignore
-from dassl.metrics import compute_accuracy  # type: ignore
-from dassl.utils import load_pretrained_weights, load_checkpoint  # type: ignore
-from dassl.optim import build_optimizer, build_lr_scheduler  # type: ignore
+from dassl.engine import TRAINER_REGISTRY, TrainerX
+from dassl.metrics import compute_accuracy
+from dassl.utils import load_pretrained_weights, load_checkpoint
+from dassl.optim import build_optimizer, build_lr_scheduler
 
 from clip import clip
-from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer  # type: ignore
+from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 from transformers import CLIPModel, CLIPTokenizerFast
 from open_clip import get_tokenizer, create_model_from_pretrained
 import conch.open_clip_custom
@@ -41,7 +41,6 @@ def count_params(model: nn.Module):
 
 
 def count_params_by_module(model: nn.Module, key="prompt_learner"):
-    # utile pour vérifier que seul prompt_learner est entraîné
     sub = dict(model.named_modules()).get(key, None)
     if sub is None:
         return None
@@ -65,7 +64,6 @@ def vis_dim_from_encode_image_strict(model, image_size=224):
     if isinstance(y, (tuple, list)):
         y = y[0]
     if isinstance(y, dict):
-        # au cas où
         y = y.get("image_features", next(iter(y.values())))
     if y.dim() != 2:
         y = y.reshape(y.size(0), -1)
@@ -75,196 +73,6 @@ def vis_dim_from_encode_image_strict(model, image_size=224):
     model.to(device=orig_device, dtype=orig_dtype)
     model.train(was_training)
     return d
-
-
-def debug_sanity_check_adapter(trainer, batch):
-    print("\n" + "=" * 100)
-    print("🔍 SANITY CHECK CLIP-ADAPTER (RESIDUAL BOTTLENECK + UPDATES)")
-    print("=" * 100)
-
-    model = trainer.model
-    img, label = trainer.parse_batch_train(batch)
-    m = model.module if hasattr(model, "module") else model
-
-    # ---------- helpers ----------
-    def _get_backbone_image_features(m, img):
-        """Compute image features WITHOUT adapter mixing (backbone-only)."""
-        with torch.no_grad():
-            if hasattr(m, "encode_image"):
-                return m.encode_image(img)
-
-            # fallback wrappers
-            if hasattr(m, "biomed"):
-                dt = next(m.biomed.parameters()).dtype
-                return m.biomed.encode_image(img.to(dtype=dt))
-
-            if hasattr(m, "clip_model") and hasattr(m.clip_model, "encode_image"):
-                dt = next(m.clip_model.parameters()).dtype
-                return m.clip_model.encode_image(img.to(dtype=dt))
-
-            raise AttributeError(f"{type(m)} has no encode_image and no known fallback")
-
-    def _adapter_out(m, feats):
-        """Adapter(feats.float()) then cast back to feats.dtype (like forward)."""
-        a = m.adapter(feats.float()).to(feats.dtype)
-        return a
-
-    def _mix(feats, a_out, ratio):
-        return ratio * a_out + (1.0 - ratio) * feats
-
-    # ---------- [0] Batch ----------
-    print("\n[0] Batch")
-    print("  img:", tuple(img.shape), img.dtype, img.device)
-    print(
-        "  label:",
-        tuple(label.shape),
-        label.dtype,
-        label.device,
-        "min/max:",
-        int(label.min().item()),
-        int(label.max().item()),
-    )
-
-    # ---------- [1] Trainable params ----------
-    print("\n[1] Trainable parameters (should be ONLY adapter.*)")
-    trainable = [(n, p) for n, p in m.named_parameters() if p.requires_grad]
-    print("  n_trainable:", len(trainable))
-    for n, p in trainable:
-        print(f"   ✔ {n:55s} shape={tuple(p.shape)} dtype={p.dtype} device={p.device}")
-
-    names = [n for n, _ in trainable]
-    assert len(names) > 0, "❌ No trainable parameters found"
-    assert all(
-        n.startswith("adapter.") or ".adapter." in n for n in names
-    ), "❌ non-adapter param trainable"
-
-    # ---------- [2] Is there a TEXT adapter? ----------
-    # In your current code: NO. (text_encoder() returns features but no adapter applied)
-    has_text_adapter = (
-        hasattr(m, "text_adapter")
-        or (hasattr(m, "adapter_text"))
-        or (hasattr(m, "text_encoder") and hasattr(m.text_encoder, "adapter"))
-    )
-    print("\n[2] Text-adapter presence")
-    print(
-        "  has_text_adapter:",
-        bool(has_text_adapter),
-        " (expected: False with current implementation)",
-    )
-
-    # ---------- [3] Adapter architecture (bottleneck) ----------
-    print("\n[3] Adapter architecture sanity")
-    # Try to read Linear dims (bottleneck reduction)
-    linears = [mod for mod in m.adapter.modules() if isinstance(mod, nn.Linear)]
-    print("  n_linear_layers:", len(linears))
-    if len(linears) >= 2:
-        in0, out0 = linears[0].in_features, linears[0].out_features
-        in1, out1 = linears[1].in_features, linears[1].out_features
-        print("  linear1: in -> out =", in0, "->", out0)
-        print("  linear2: in -> out =", in1, "->", out1)
-        if out0 < in0:
-            print("  ✔ bottleneck reduction detected (out0 < in0)")
-        else:
-            print("  ⚠ no reduction detected (check reduction factor)")
-    else:
-        print("  ⚠ could not infer bottleneck dims (unexpected adapter structure)")
-
-    # ---------- [4] Forward eval -> logits ----------
-    print("\n[4] Forward eval -> logits")
-    was_training = m.training
-    m.eval()
-    with torch.no_grad():
-        out = m(img)
-    print(
-        "  logits:",
-        tuple(out.shape),
-        out.dtype,
-        out.device,
-        "min/max:",
-        float(out.min().item()),
-        float(out.max().item()),
-    )
-
-    # ---------- [5] Verify residual mixing is actually used ----------
-    print("\n[5] Residual mixing checks (image adapter is used)")
-    m.eval()
-    with torch.no_grad():
-        feats = _get_backbone_image_features(m, img)  # backbone-only
-        a_out = _adapter_out(m, feats)
-        ratio = 0.2  # MUST match your forward
-        mixed = _mix(feats, a_out, ratio)
-
-        # sanity: mixed differs from feats if adapter is non-trivial
-        d_mix = (mixed - feats).abs().mean().item()
-        d_a = (a_out - feats).abs().mean().item()
-        print("  image_features:", tuple(feats.shape), feats.dtype)
-        print("  adapter_out:", tuple(a_out.shape), a_out.dtype)
-        print("  mean|adapter_out - image_features|:", float(d_a))
-        print("  mean|mixed - image_features|:", float(d_mix))
-
-        assert d_mix > 0, "❌ mixed == feats (adapter not affecting features?)"
-        # check exact formula numerically
-        mixed_ref = ratio * a_out + (1.0 - ratio) * feats
-        err = (mixed - mixed_ref).abs().max().item()
-        print("  max|mixed - (ratio*a + (1-ratio)*feats)|:", float(err))
-        assert err < 1e-6, "❌ residual mixing formula mismatch"
-
-    # ---------- [7] Train forward -> backward: grads exist ----------
-    print("\n[7] Train forward -> loss + backward (grads)")
-    m.train()
-    m.zero_grad(set_to_none=True)
-    logits = m(img)
-    loss = F.cross_entropy(logits, label)
-    print("  loss:", float(loss.item()))
-    loss.backward()
-
-    # grads on adapter params only
-    none_grads = []
-    zeroish = []
-    for n, p in m.adapter.named_parameters():
-        if p.grad is None:
-            none_grads.append(n)
-        else:
-            gm = p.grad.abs().mean().item()
-            if gm == 0:
-                zeroish.append(n)
-    print("  adapter params with grad None:", none_grads)
-    if len(none_grads) == 0:
-        print("  ✔ all adapter params have grads")
-    if len(zeroish) > 0:
-        print("  ⚠ adapter params with grad mean == 0:", zeroish)
-
-    assert len(none_grads) == 0, "❌ some adapter params have grad=None"
-
-    # ---------- [8] Step check: adapter weights move ----------
-    print("\n[8] Optim step check: adapter weights actually update")
-    # snapshot
-    w_before = {n: p.detach().clone() for n, p in m.adapter.named_parameters()}
-
-    # do one tiny manual step with trainer's optimizer if exists,
-    # otherwise fallback to a local SGD
-    opt = getattr(trainer, "optim", None)
-    if opt is None:
-        opt = torch.optim.SGD(m.adapter.parameters(), lr=1e-3)
-
-    opt.step()
-
-    deltas = {}
-    for n, p in m.adapter.named_parameters():
-        deltas[n] = (p.detach() - w_before[n]).abs().mean().item()
-
-    # print a few
-    for n, d in list(deltas.items())[:6]:
-        print(f"  Δ{n} (mean abs): {d:.3e}")
-
-    moved = sum(d > 0 for d in deltas.values())
-    print("  n_params_moved:", moved, "/", len(deltas))
-    assert moved > 0, "❌ adapter weights did not update after step"
-
-    m.train(was_training)
-
-    print("\n✅ SANITY CHECK DONE")
-    print("=" * 100 + "\n")
 
 
 def load_clip_to_cpu(cfg):
@@ -357,7 +165,7 @@ class TextEncoder(nn.Module):
     def forward(self):
         device = next(self.clip_model.parameters()).device
         temp = CUSTOM_TEMPLATES[self.cfg.DATASET.NAME]
-        prompts = [temp.format(c.replace('_', ' ')) for c in self.classnames]
+        prompts = [temp.format(c.replace("_", " ")) for c in self.classnames]
         prompts = torch.cat([clip.tokenize(p) for p in prompts])
         prompts = prompts.to(device)
         text_features = self.clip_model.encode_text(prompts)
@@ -432,7 +240,7 @@ class CustomBiomedCLIP(nn.Module):
         tok = tokenizer(prompts)
         if isinstance(tok, dict):
             tok = tok.get("input_ids", list(tok.values())[0])
-        if hasattr(tok, "input_ids"):   # tokenizers.Encoding / BatchEncoding-like
+        if hasattr(tok, "input_ids"):
             tok = tok.input_ids
         tok = torch.as_tensor(tok, dtype=torch.long)
 
@@ -531,9 +339,8 @@ class CustomQuiltCLIP(nn.Module):
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-        # logits
         if self.logit_scale is None:
-            logit_scale = torch.tensor(1 / 0.07, device=device)  # constant
+            logit_scale = torch.tensor(1 / 0.07, device=device)
         else:
             logit_scale = self.logit_scale.exp()
         logits = logit_scale * image_features @ text_features.t()
@@ -600,7 +407,6 @@ class CustomPubMedCLIP(nn.Module):
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-        # ---- logit scale ----
         if self.logit_scale is None:
             logit_scale = torch.tensor(
                 1 / 0.07, device=device, dtype=text_features.dtype
@@ -647,7 +453,7 @@ class CustomConchCLIP(nn.Module):
             return_tensors="pt",
         )[
             "input_ids"
-        ]  # (n_cls, 77)
+        ]
         tok = torch.as_tensor(tok, dtype=torch.long)
         self.register_buffer("tokenized_prompts", tok, persistent=False)
 
@@ -677,7 +483,6 @@ class CustomConchCLIP(nn.Module):
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-        # ---- logit scale ----
         if self.logit_scale is None:
             logit_scale = torch.tensor(
                 1 / 0.07, device=device, dtype=text_features.dtype
@@ -761,10 +566,6 @@ class CLIP_Adapter(TrainerX):
         pl = count_params_by_module(m, "adapter")
         if pl is not None:
             print(f"[PARAMS] adapter total/trainable = {pl[0]:,} / {pl[1]:,}")
-
-        # Debug - sanity check
-        batch_debug = next(iter(self.train_loader_x))
-        debug_sanity_check_adapter(self, batch_debug)
 
         # NOTE: only give text_encoder.adapter to the optimizer
         self.optim = build_optimizer(self.model.adapter, cfg.OPTIM)

@@ -5,7 +5,10 @@ source /env/dassl/bin/activate
 cd ./Cytology_Benchmark/
 
 DATA=/path/to/datasets
-TRAINER=CoCoOp
+TRAINER=CoOp
+CTP=end
+NCTX=4
+CSC=False
 
 # --- grids (arrays) ---
 DATASETS=(apacc bcfc bloodmnist bmcd bmt fnac2019 hicervix herlev mlcc sipakmed)
@@ -25,8 +28,8 @@ OFFSET=0
 tid=$((SLURM_ARRAY_TASK_ID + OFFSET))
 
 if (( tid < 0 || tid >= total )); then
-  echo "Error: SLURM_ARRAY_TASK_ID=$tid out of range [0, $((total-1))]"
-  exit 1
+    echo "Error: SLURM_ARRAY_TASK_ID=$tid out of range [0, $((total-1))]"
+    exit 1
 fi
 
 # order: dataset -> cfg -> shots -> seed  (same nesting as your for-loops)
@@ -44,7 +47,7 @@ CFG=${CFGS[$cfg_idx]}
 SHOTS=${SHOTS_LIST[$shots_idx]}
 SEED=${SEEDS[$seed_idx]}
 
-DIR=./Cytology_Benchmark/output/${DATASET}/${TRAINER}/${CFG}/${SHOTS}shots/seed${SEED}
+DIR=./Cytology_Benchmark/output/${DATASET}/${TRAINER}/${CFG}/${SHOTS}shots/nctx${NCTX}_csc${CSC}_ctp${CTP}/seed${SEED}
 LOGFILE="${DIR}/log.txt"
 
 echo "Task ${tid}/${total}: DATASET=${DATASET} CFG=${CFG} SHOTS=${SHOTS} SEED=${SEED}"
@@ -52,8 +55,8 @@ echo "Output dir: ${DIR}"
 
 # --- skip if already done ---
 if [[ -f "${LOGFILE}" ]]; then
-  echo "SKIP: log exists -> ${LOGFILE}"
-  exit 0
+    echo "SKIP: log exists -> ${LOGFILE}"
+    exit 0
 fi
 
 mkdir -p "${DIR}"
@@ -65,5 +68,8 @@ python train.py \
   --dataset-config-file configs/datasets/${DATASET}.yaml \
   --config-file configs/trainers/${TRAINER}/${CFG}.yaml \
   --output-dir ${DIR} \
-  DATASET.NUM_SHOTS ${SHOTS} \
-  DATASET.SUBSAMPLE_CLASSES all
+  TRAINER.COOP.N_CTX ${NCTX} \
+  TRAINER.COOP.CSC ${CSC} \
+  TRAINER.COOP.PREC fp16 \
+  TRAINER.COOP.CLASS_TOKEN_POSITION ${CTP} \
+  DATASET.NUM_SHOTS ${SHOTS}

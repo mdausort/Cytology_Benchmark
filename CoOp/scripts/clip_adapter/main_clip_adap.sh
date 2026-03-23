@@ -1,25 +1,10 @@
-#!/bin/bash
-#SBATCH --job-name=clip_adapter
-#SBATCH --cpus-per-task=4
-#SBATCH --ntasks=1
-#SBATCH --mem=16G
-#SBATCH --partition=gpu
-#SBATCH --gpus=1
-#SBATCH --time=00:30:00
-#SBATCH --output="/gpfs/projects/acad/coalap/mdausort/ISBI_sup/logs_debug/clip_adapter_%A_%a.out"
-#SBATCH --error="/gpfs/projects/acad/coalap/mdausort/ISBI_sup/logs_debug/clip_adapter_%A_%a.err"
-#SBATCH --account=coalap
-#SBATCH --array=0-999%100
-
-set -euo pipefail
-
 # 1) activate your venv
-source /gpfs/home/acad/ucl-elen/mdausort/env/dassl/bin/activate
+source /env/dassl/bin/activate
 
-# 2) go to the repo
-cd /gpfs/projects/acad/coalap/mdausort/ISBI_sup/CoOp/
+# 2) Go to the repo
+cd ./Cytology_Benchmark/
 
-DATA=/gpfs/home/acad/ucl-elen/mdausort/data/
+DATA=/path/to/datasets
 TRAINER=CLIP_Adapter
 CTP=end
 NCTX=4
@@ -27,14 +12,9 @@ CSC=False
 
 # --- grids (arrays) ---
 DATASETS=(apacc bcfc bloodmnist bmcd bmt fnac2019 hicervix herlev mlcc sipakmed)
-CFGS=(conch_vit_b16_ep100 vit_b16_ep100 vit_b32_ep100 biomedclip_vit_b16_ep100 quilt_vit_b16_ep100 quilt_vit_b32_ep100 plip_vit_b32_ep100 pubmedclip_vit_b32_ep100)
+CFGS=(conch_vit_b16 vit_b16 vit_b32 biomedclip_vit_b16 quilt_vit_b16 quilt_vit_b32 plip_vit_b32 pubmedclip_vit_b32)
 SHOTS_LIST=(1 2 4 8 16)
 SEEDS=(1 2 3)
-
-# DATASETS=(bcfc sipakmed)
-# CFGS=(conch_vit_b16_ep100 vit_b16_ep100 vit_b32_ep100 biomedclip_vit_b16_ep100 quilt_vit_b16_ep100 quilt_vit_b32_ep100 plip_vit_b32_ep100 pubmedclip_vit_b32_ep100)
-# SHOTS_LIST=(1)
-# SEEDS=(1)
 
 # --- compute combination from SLURM_ARRAY_TASK_ID ---
 nd=${#DATASETS[@]}
@@ -67,7 +47,7 @@ CFG=${CFGS[$cfg_idx]}
 SHOTS=${SHOTS_LIST[$shots_idx]}
 SEED=${SEEDS[$seed_idx]}
 
-DIR=/gpfs/projects/acad/coalap/mdausort/ISBI_sup/output/${DATASET}/${TRAINER}/${CFG}/${SHOTS}shots/nctx${NCTX}_csc${CSC}_ctp${CTP}/seed${SEED}
+DIR=./Cytology_Benchmark/output/${DATASET}/${TRAINER}/${CFG}/${SHOTS}shots/nctx${NCTX}_csc${CSC}_ctp${CTP}/seed${SEED}
 LOGFILE="${DIR}/log.txt"
 
 echo "Task ${tid}/${total}: DATASET=${DATASET} CFG=${CFG} SHOTS=${SHOTS} SEED=${SEED}"
@@ -85,8 +65,8 @@ python train.py \
   --root ${DATA} \
   --seed ${SEED} \
   --trainer ${TRAINER} \
-  --dataset-config-file /gpfs/projects/acad/coalap/mdausort/ISBI_sup/CoOp/configs/datasets/${DATASET}.yaml \
-  --config-file /gpfs/projects/acad/coalap/mdausort/ISBI_sup/CoOp/configs/trainers/${TRAINER}/${CFG}.yaml \
+  --dataset-config-file configs/datasets/${DATASET}.yaml \
+  --config-file configs/trainers/${TRAINER}/${CFG}.yaml \
   --output-dir ${DIR} \
   TRAINER.COOP.N_CTX ${NCTX} \
   TRAINER.COOP.CSC ${CSC} \

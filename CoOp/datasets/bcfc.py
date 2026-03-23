@@ -27,7 +27,6 @@ class BCFC(DatasetBase):
         self.image_dir = os.path.join(self.dataset_dir, "images")
         self.splits_dir = os.path.join(self.dataset_dir, "splits")
 
-        # few-shot cache (optionnel)
         self.split_fewshot_dir = os.path.join(self.dataset_dir, "split_fewshot")
         os.makedirs(self.split_fewshot_dir, exist_ok=True)
 
@@ -35,7 +34,6 @@ class BCFC(DatasetBase):
         val = self.read_txt_split(os.path.join(self.splits_dir, SPLIT_FILES["val"]))
         test = self.read_txt_split(os.path.join(self.splits_dir, SPLIT_FILES["test"]))
 
-        # few-shot (même logique que EuroSAT)
         num_shots = cfg.DATASET.NUM_SHOTS
         if num_shots >= 1:
             seed = cfg.SEED
@@ -70,7 +68,6 @@ class BCFC(DatasetBase):
                 if not line:
                     continue
 
-                # robust split: allow spaces/tabs
                 parts = line.split()
                 if len(parts) < 2:
                     raise ValueError(f"Bad line format in {filepath} at line {ln}: {line}")
@@ -78,13 +75,11 @@ class BCFC(DatasetBase):
                 rel_impath = parts[0]
                 label = int(parts[1])
 
-                # classname from folder name (first component)
                 class_folder = rel_impath.split("/")[0]
                 classname = NEW_CNAMES.get(class_folder, class_folder)
 
                 impath = os.path.join(self.image_dir, rel_impath)
 
-                # optionnel: check existence (tu peux enlever si ça ralentit)
                 if not os.path.exists(impath):
                     raise FileNotFoundError(
                         f"Image not found (from split): {impath} (line {ln} in {filepath})"

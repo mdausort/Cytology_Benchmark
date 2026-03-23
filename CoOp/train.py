@@ -1,28 +1,28 @@
 import argparse
 import torch
 
-from dassl.utils import setup_logger, set_random_seed, collect_env_info  # type: ignore
-from dassl.config import get_cfg_default  # type: ignore
-from dassl.engine import build_trainer  # type: ignore
+from dassl.utils import setup_logger, set_random_seed, collect_env_info
+from dassl.config import get_cfg_default
+from dassl.engine import build_trainer
 
 # custom
-import datasets.apacc # noqa # type: ignore
-import datasets.bcfc  # noqa # type: ignore
-import datasets.bloodmnist  # noqa # type: ignore
-import datasets.bmcd  # noqa # type: ignore
-import datasets.bmt  # noqa # type: ignore
-import datasets.eurosat  # noqa # type: ignore
-import datasets.fnac2019  # noqa # type: ignore
-import datasets.herlev  # noqa # type: ignore
-import datasets.hicervix  # noqa # type: ignore
-import datasets.mlcc  # noqa # type: ignore
-import datasets.sipakmed  # noqa # type: ignore
+import datasets.apacc
+import datasets.bcfc 
+import datasets.bloodmnist 
+import datasets.bmcd 
+import datasets.bmt 
+import datasets.eurosat 
+import datasets.fnac2019 
+import datasets.herlev 
+import datasets.hicervix 
+import datasets.mlcc 
+import datasets.sipakmed 
 
 
-import trainers.coop  # noqa # type: ignore
-import trainers.cocoop  # noqa # type: ignore
-import trainers.clip_adapter  # noqa # type: ignore
-import trainers.zsclip  # noqa # type: ignore
+import trainers.coop 
+import trainers.cocoop 
+import trainers.clip_adapter 
+import trainers.zsclip 
 
 
 def print_args(args, cfg):
@@ -82,7 +82,7 @@ def extend_cfg(cfg):
         cfg.TRAINER.MY_MODEL.PARAM_B = 0.5
         cfg.TRAINER.MY_MODEL.PARAM_C = False
     """
-    from yacs.config import CfgNode as CN  # type: ignore
+    from yacs.config import CfgNode as CN
 
     cfg.TRAINER.COOP = CN()
     cfg.TRAINER.COOP.N_CTX = 16  # number of context vectors

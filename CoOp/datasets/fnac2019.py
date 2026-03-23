@@ -27,7 +27,6 @@ class FNAC2019(DatasetBase):
         self.image_dir = os.path.join(self.dataset_dir, "images")
         self.splits_dir = os.path.join(self.dataset_dir, "splits")
 
-        # few-shot cache (optionnel)
         self.split_fewshot_dir = os.path.join(self.dataset_dir, "split_fewshot")
         os.makedirs(self.split_fewshot_dir, exist_ok=True)
 
@@ -35,7 +34,6 @@ class FNAC2019(DatasetBase):
         val = self.read_txt_split(os.path.join(self.splits_dir, SPLIT_FILES["val"]))
         test = self.read_txt_split(os.path.join(self.splits_dir, SPLIT_FILES["test"]))
 
-        # few-shot (même logique que EuroSAT)
         num_shots = cfg.DATASET.NUM_SHOTS
         if num_shots >= 1:
             seed = cfg.SEED
@@ -59,10 +57,7 @@ class FNAC2019(DatasetBase):
         super().__init__(train_x=train, val=val, test=test)
 
     def read_txt_split(self, filepath):
-        """
-        Each line:  im_Dyskeratotic/073_02.bmp 0
-        Path is relative to images/ (i.e., images/<that_path>)
-        """
+
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Split file not found: {filepath}")
 
@@ -73,7 +68,6 @@ class FNAC2019(DatasetBase):
                 if not line:
                     continue
 
-                # robust split: allow spaces/tabs
                 parts = line.split()
                 if len(parts) < 2:
                     raise ValueError(f"Bad line format in {filepath} at line {ln}: {line}")
@@ -81,13 +75,11 @@ class FNAC2019(DatasetBase):
                 rel_impath = parts[0]
                 label = int(parts[1])
 
-                # classname from folder name (first component)
                 class_folder = rel_impath.split("/")[0]
                 classname = NEW_CNAMES.get(class_folder, class_folder)
 
                 impath = os.path.join(self.image_dir, rel_impath)
 
-                # optionnel: check existence (tu peux enlever si ça ralentit)
                 if not os.path.exists(impath):
                     raise FileNotFoundError(
                         f"Image not found (from split): {impath} (line {ln} in {filepath})"
