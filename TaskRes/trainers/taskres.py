@@ -6,27 +6,18 @@ Oct 4, 2022
 
 import os.path as osp
 import torch
-
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.cuda.amp import GradScaler, autocast
-
 from dassl.engine import TRAINER_REGISTRY, TrainerX
 from dassl.metrics import compute_accuracy
 from dassl.utils import load_pretrained_weights, load_checkpoint
 from dassl.optim import build_optimizer, build_lr_scheduler
-
 from clip import clip
 from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 from open_clip import get_tokenizer, create_model_from_pretrained
 from transformers import CLIPModel, CLIPTokenizerFast
 import conch.open_clip_custom
-
-
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.benchmark = True
-torch.backends.cudnn.deterministic = False
-torch.backends.cudnn.allow_tf32 = True
 
 
 _tokenizer = _Tokenizer()
@@ -48,6 +39,13 @@ CUSTOM_TEMPLATES = {
 
 
 def _as_input_ids(tok_out):
+    """
+    Convert tokenizer outputs to a tensor of input ids.
+    Arg:
+        tok_out: tokenizer output in dict, tensor, or tokenizer-specific format.
+    Return:
+        input_ids: token ids as a tensor.
+    """
     if isinstance(tok_out, dict):
         ids = tok_out.get("input_ids", list(tok_out.values())[0])
     else:
@@ -58,6 +56,16 @@ def _as_input_ids(tok_out):
 
 
 def _extract_input_ids_any(tok, device, max_len=77, pad_id=0):
+    """
+    Extract input ids from various tokenizer output formats and move them to the target device.
+    Arg:
+        tok: tokenizer output.
+        device: target device.
+        max_len: target sequence length.
+        pad_id: padding token id.
+    Return:
+        input_ids: padded or truncated token ids.
+    """
     if torch.is_tensor(tok):
         ids = tok
         if ids.dim() == 1:
@@ -109,7 +117,17 @@ def _extract_input_ids_any(tok, device, max_len=77, pad_id=0):
     raise TypeError(f"Unsupported tokenizer output type: {type(tok)}")
 
 
-def _pad_trunc(ids: torch.Tensor, max_len=77, pad_id=0):
+def _pad_trunc(ids, max_len=77, pad_id=0):
+    """
+    Extract input ids from various tokenizer output formats and move them to the target device.
+    Arg:
+        tok: tokenizer output.
+        device: target device.
+        max_len: target sequence length.
+        pad_id: padding token id.
+    Return:
+        input_ids: padded or truncated token ids.
+    """
     if ids.size(1) > max_len:
         return ids[:, :max_len]
     if ids.size(1) < max_len:
@@ -118,13 +136,27 @@ def _pad_trunc(ids: torch.Tensor, max_len=77, pad_id=0):
     return ids
 
 
-def _vision_dtype_from_module(vision: torch.nn.Module) -> torch.dtype:
+def _vision_dtype_from_module(vision):
+    """
+    Retrieve the dtype used by the vision encoder.
+    Arg:
+        vision: vision encoder module.
+    Return:
+        dtype: dtype of the vision module parameters.
+    """
     if hasattr(vision, "conv1") and hasattr(vision.conv1, "weight"):
         return vision.conv1.weight.dtype
     return next(vision.parameters()).dtype
 
 
 def load_clip_to_cpu(cfg):
+    """
+    Load the selected CLIP-like backbone on CPU.
+    Arg:
+        cfg: configuration object containing the backbone name.
+    Return:
+        model: loaded backbone model.
+    """
     backbone_name = cfg.MODEL.BACKBONE.NAME
 
     if backbone_name == "BiomedCLIP":
@@ -189,6 +221,13 @@ def load_clip_to_cpu(cfg):
 
 class TextEncoder(nn.Module):
     def __init__(self, clip_model):
+        """
+        Initialize the text encoder from the CLIP model.
+        Arg:
+            clip_model: CLIP model containing the text encoder components.
+        Return:
+            None
+        """
         super().__init__()
         self.transformer = clip_model.transformer
         self.positional_embedding = clip_model.positional_embedding
@@ -197,6 +236,14 @@ class TextEncoder(nn.Module):
         self.dtype = clip_model.dtype
 
     def forward(self, prompts, tokenized_prompts):
+        """
+        Encode prompt embeddings into text features.
+        Arg:
+            prompts: embedded prompt tokens.
+            tokenized_prompts: tokenized prompts used to identify the end-of-text token.
+        Return:
+            x: encoded text features.
+        """
         x = prompts + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)
         x = self.transformer(x)
@@ -216,6 +263,14 @@ class TextEncoder(nn.Module):
 # TaskRes(-Text)
 class TaskResLearner(nn.Module):
     def __init__(self, cfg, base_text_features):
+        """
+        Initialize the task residual learner on top of base text features.
+        Arg:
+            cfg: configuration object.
+            base_text_features: base text features used as initialization.
+        Return:
+            None
+        """
         super().__init__()
         self.alpha = cfg.TRAINER.TaskRes.RESIDUAL_SCALE
         print(">> DCT scale factor: ", self.alpha)
@@ -223,6 +278,11 @@ class TaskResLearner(nn.Module):
         self.text_feature_residuals = nn.Parameter(torch.zeros_like(base_text_features))
 
     def forward(self):
+        """
+        Compute residual-adjusted text features.
+        Return:
+            text_features: residual-adjusted text features.
+        """
         return (
             self.base_text_features + self.alpha * self.text_feature_residuals
         )
@@ -245,6 +305,16 @@ class TaskResLearner(nn.Module):
 
 
 def _get_base_text_features(cfg, classnames, clip_model, text_encoder):
+    """
+    Compute base text features for the original CLIP model from prompt templates.
+    Arg:
+        cfg: configuration object.
+        classnames: list of class names.
+        clip_model: CLIP backbone model.
+        text_encoder: text encoder used to encode prompt embeddings.
+    Return:
+        text_embeddings: base text features.
+    """
     device = next(text_encoder.parameters()).device
     if clip_model.dtype == torch.float16:
         text_encoder = text_encoder.cuda()
@@ -275,6 +345,17 @@ def _get_base_text_features(cfg, classnames, clip_model, text_encoder):
 def _get_enhanced_base_text_features(
     cfg, classnames, clip_model, text_encoder, pretraiend_model
 ):
+    """
+    Compute enhanced base text features using a pretrained text projection.
+    Arg:
+        cfg: configuration object.
+        classnames: list of class names.
+        clip_model: CLIP backbone model.
+        text_encoder: text encoder used to encode prompt embeddings.
+        pretraiend_model: path to the pretrained text projection model.
+    Return:
+        text_embeddings: enhanced base text features.
+    """
     device = next(text_encoder.parameters()).device
     if clip_model.dtype == torch.float16:
         text_encoder = text_encoder.cuda()
@@ -316,6 +397,16 @@ def _get_enhanced_base_text_features(
 
 
 def _get_base_text_features_biomed(cfg, classnames, biomed_model, tokenizer):
+    """
+    Compute base text features for BiomedCLIP from prompt templates.
+    Arg:
+        cfg: configuration object.
+        classnames: list of class names.
+        biomed_model: BiomedCLIP model.
+        tokenizer: tokenizer associated with the model.
+    Return:
+        text_embeddings: base text features.
+    """
     device = next(biomed_model.parameters()).device
     dtype = next(biomed_model.parameters()).dtype
 
@@ -354,7 +445,16 @@ def _get_base_text_features_biomed(cfg, classnames, biomed_model, tokenizer):
 
 
 def _get_base_text_features_quilt(cfg, classnames, quilt_model, tokenizer):
-
+    """
+    Compute base text features for BiomedCLIP from prompt templates.
+    Arg:
+        cfg: configuration object.
+        classnames: list of class names.
+        biomed_model: BiomedCLIP model.
+        tokenizer: tokenizer associated with the model.
+    Return:
+        text_embeddings: base text features.
+    """
     device = next(quilt_model.parameters()).device
     dtype = next(quilt_model.parameters()).dtype
 
@@ -393,6 +493,16 @@ def _get_base_text_features_quilt(cfg, classnames, quilt_model, tokenizer):
 
 
 def _get_base_text_features_conch(cfg, classnames, conch_model, tokenizer):
+    """
+    Compute base text features for the Conch model from prompt templates.
+    Arg:
+        cfg: configuration object.
+        classnames: list of class names.
+        conch_model: Conch model.
+        tokenizer: tokenizer associated with the model.
+    Return:
+        text_embeddings: base text features.
+    """
     device = next(conch_model.parameters()).device
 
     dataset = cfg.DATASET.NAME
@@ -427,6 +537,16 @@ def _get_base_text_features_conch(cfg, classnames, conch_model, tokenizer):
 
 
 def _get_base_text_features_pubmedclip(cfg, classnames, clip_model, tokenizer):
+    """
+    Compute base text features for a Hugging Face CLIP-based model from prompt templates.
+    Arg:
+        cfg: configuration object.
+        classnames: list of class names.
+        clip_model: Hugging Face CLIP-based model.
+        tokenizer: tokenizer associated with the model.
+    Return:
+        text_embeddings: base text features.
+    """
     device = next(clip_model.parameters()).device
     dataset = cfg.DATASET.NAME
 
@@ -462,6 +582,15 @@ def _get_base_text_features_pubmedclip(cfg, classnames, clip_model, tokenizer):
 # TaskRes by Tao Yu, Oct 4, 2022
 class CustomCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
+        """
+        Initialize the TaskRes model based on the original CLIP backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: CLIP backbone model.
+        Return:
+            None
+        """
         super().__init__()
         self.image_encoder = clip_model.visual
         self.logit_scale = clip_model.logit_scale
@@ -485,6 +614,13 @@ class CustomCLIP(nn.Module):
         self.prompt_learner = TaskResLearner(cfg, base_text_features)
 
     def forward(self, image):
+        """
+        Compute classification logits from image features and residual-adjusted text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         try:
             image_features = self.image_encoder(image.type(self.dtype))
         except:
@@ -508,6 +644,16 @@ class CustomCLIP(nn.Module):
 
 class CustomBiomedCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the TaskRes model based on BiomedCLIP.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: BiomedCLIP backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -527,6 +673,13 @@ class CustomBiomedCLIP(nn.Module):
         self.prompt_learner = TaskResLearner(cfg, base_text_features)
 
     def forward(self, image):
+        """
+        Compute classification logits from image features and residual-adjusted text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
         vision_dtype = _vision_dtype_from_module(self.vision)
         try:
@@ -560,6 +713,16 @@ class CustomBiomedCLIP(nn.Module):
 
 class CustomQuiltCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the TaskRes model based on a Quilt/OpenCLIP backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Quilt/OpenCLIP backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -576,6 +739,13 @@ class CustomQuiltCLIP(nn.Module):
         self.prompt_learner = TaskResLearner(cfg, base_text_features)
 
     def forward(self, image):
+        """
+        Compute classification logits from image features and residual-adjusted text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
         try:
             image_features = self.image_encoder(image.type(self.dtype))
@@ -604,6 +774,16 @@ class CustomQuiltCLIP(nn.Module):
 
 class CustomConchCLIP(nn.Module):
     def __init__(self, cfg, classnames, conch_model, tokenizer):
+        """
+        Initialize the TaskRes model based on the Conch backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            conch_model: Conch backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -619,6 +799,13 @@ class CustomConchCLIP(nn.Module):
         self.dtype = next(conch_model.parameters()).dtype
 
     def forward(self, image):
+        """
+        Compute classification logits from image features and residual-adjusted text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
         imf = self.clip_model.encode_image(image.to(dtype=self.dtype))
         imf = imf / imf.norm(dim=-1, keepdim=True)
@@ -636,6 +823,16 @@ class CustomConchCLIP(nn.Module):
 
 class CustomPubMedCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the TaskRes model based on a Hugging Face CLIP-based model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Hugging Face CLIP-based model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -652,6 +849,13 @@ class CustomPubMedCLIP(nn.Module):
         self.prompt_learner = TaskResLearner(cfg, base_text_features)
 
     def forward(self, image):
+        """
+        Compute classification logits from image features and residual-adjusted text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
 
         try:
