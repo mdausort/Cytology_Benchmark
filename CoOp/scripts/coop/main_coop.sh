@@ -1,8 +1,8 @@
-# 1) activate your venv
+# --- activate your venv ---
 source /env/dassl/bin/activate
 
-# 2) Go to the repo
-cd ./Cytology_Benchmark/
+# --- go to the repo ---
+cd ./Cytology_Benchmark/CoOp
 
 DATA=/path/to/datasets
 TRAINER=CoOp
@@ -12,7 +12,7 @@ CSC=False
 
 # --- grids (arrays) ---
 DATASETS=(apacc bcfc bloodmnist bmcd bmt fnac2019 hicervix herlev mlcc sipakmed)
-CFGS=(conch_vit_b16 vit_b16 vit_b32 biomedclip_vit_b16 quilt_vit_b16 quilt_vit_b32 plip_vit_b32 pubmedclip_vit_b32)
+CFGS=(conch_vit_b16 clip_vit_b16 clip_vit_b32 biomedclip_vit_b16 quilt_vit_b16 quilt_vit_b32 plip_vit_b32 pubmedclip_vit_b32)
 SHOTS_LIST=(1 2 4 8 16)
 SEEDS=(1 2 3)
 
@@ -61,6 +61,7 @@ fi
 
 mkdir -p "${DIR}"
 
+# --- launch code ---
 python train.py \
   --root ${DATA} \
   --seed ${SEED} \

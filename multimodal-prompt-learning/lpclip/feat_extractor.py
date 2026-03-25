@@ -6,8 +6,20 @@ import sys
 sys.path.append(os.path.abspath(".."))
 
 from datasets.oxford_pets import OxfordPets
+from datasets.oxford_flowers import OxfordFlowers
+from datasets.fgvc_aircraft import FGVCAircraft
+from datasets.dtd import DescribableTextures
 from datasets.eurosat import EuroSAT
-
+from datasets.stanford_cars import StanfordCars
+from datasets.food101 import Food101
+from datasets.sun397 import SUN397
+from datasets.caltech101 import Caltech101
+from datasets.ucf101 import UCF101
+from datasets.imagenet import ImageNet
+from datasets.imagenetv2 import ImageNetV2
+from datasets.imagenet_sketch import ImageNetSketch
+from datasets.imagenet_a import ImageNetA
+from datasets.imagenet_r import ImageNetR
 
 from dassl.utils import setup_logger, set_random_seed, collect_env_info
 from dassl.config import get_cfg_default
@@ -130,7 +142,7 @@ def main(args):
     ########################################
     #   Setup Network
     ########################################
-    clip_model, _ = clip.load("ViT-B/32", "cuda", jit=False)
+    clip_model, _ = clip.load("RN50", "cuda", jit=False)
     clip_model.eval()
     ###################################################################################################################
     # Start Feature Extractor

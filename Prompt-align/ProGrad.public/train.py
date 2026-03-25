@@ -1,29 +1,29 @@
 import argparse
 import torch
 
-from dassl.utils import setup_logger, set_random_seed, collect_env_info  # noqa # type: ignore
-from dassl.config import get_cfg_default  # noqa # type: ignore
-from dassl.engine import build_trainer  # noqa # type: ignore
+from dassl.utils import setup_logger, set_random_seed, collect_env_info
+from dassl.config import get_cfg_default
+from dassl.engine import build_trainer
 
 # custom
 # custom
-import datasets.apacc  # noqa # type: ignore
-import datasets.bcfc  # noqa # type: ignore
-import datasets.bloodmnist  # noqa # type: ignore
-import datasets.bmcd  # noqa # type: ignore
-import datasets.bmt  # noqa # type: ignore
-import datasets.eurosat  # noqa # type: ignore
-import datasets.fnac2019  # noqa # type: ignore
-import datasets.herlev  # noqa # type: ignore
-import datasets.hicervix  # noqa # type: ignore
-import datasets.mlcc  # noqa # type: ignore
-import datasets.sipakmed  # noqa # type: ignore
+import datasets.apacc
+import datasets.bcfc
+import datasets.bloodmnist
+import datasets.bmcd
+import datasets.bmt
+import datasets.eurosat
+import datasets.fnac2019
+import datasets.herlev
+import datasets.hicervix
+import datasets.mlcc
+import datasets.sipakmed
 
 
-import trainers.coop  # noqa # type: ignore
-import trainers.cocoop  # noqa # type: ignore
-import trainers.zsclip  # noqa # type: ignore
-import trainers.prograd  # noqa # type: ignore
+import trainers.coop
+import trainers.cocoop
+import trainers.zsclip
+import trainers.prograd
 
 
 def print_args(args, cfg):

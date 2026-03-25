@@ -23,260 +23,16 @@ from utils import (
 )
 
 
-def _is_l2_normalized(x: torch.Tensor, dim=-1, atol=1e-2):
-    n = x.norm(dim=dim)
-    return torch.isfinite(n).all() and float((n - 1.0).abs().max().item()) < atol
-
-
-def _check_finite(name, x: torch.Tensor):
-    if not torch.isfinite(x).all():
-        raise ValueError(f"[SANITY Tip] {name} contains NaN/Inf")
-
-
-def _check_shape(name, x: torch.Tensor, expected):
-    if tuple(x.shape) != tuple(expected):
-        raise ValueError(
-            f"[SANITY Tip] {name} shape {tuple(x.shape)} != expected {tuple(expected)}"
-        )
-
-
-def sanity_check_tip_adapter_any(
-    cfg,
-    backbone: str,
-    clip_model,
-    clip_weights: torch.Tensor,  # (D, C)
-    cache_keys: torch.Tensor,  # (D, Ncache)
-    cache_values: torch.Tensor,  # (Ncache, C)
-    val_features: torch.Tensor,  # (Nval, D)
-    val_labels: torch.Tensor,  # (Nval,)
-    test_features: torch.Tensor = None,
-    test_labels: torch.Tensor = None,
-    do_tip_adapter_f: bool = True,
-    batch_size_f: int = 8,
-    verbose: bool = True,
-):
-    """
-    Sanity check unifié Tip-Adapter / Tip-Adapter-F.
-    - Vérifie shapes + dtypes + normalisation
-    - Vérifie logits Zero-shot + Tip-Adapter
-    - Vérifie backward/grads pour Tip-Adapter-F (sur un mini-batch synthétique)
-    """
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # -------------------------
-    # 0) to device + fp32 matmul safe
-    # -------------------------
-    clip_weights = clip_weights.to(device=device, dtype=torch.float32)
-    cache_keys = cache_keys.to(device=device, dtype=torch.float32)
-    cache_values = cache_values.to(device=device, dtype=torch.float32)
-    val_features = val_features.to(device=device, dtype=torch.float32)
-    val_labels = val_labels.to(device=device)
-
-    if test_features is not None:
-        test_features = test_features.to(device=device, dtype=torch.float32)
-    if test_labels is not None:
-        test_labels = test_labels.to(device=device)
-
-    # make sure norms are exactly what Tip-Adapter expects (safe)
-    cache_keys = cache_keys / cache_keys.norm(dim=0, keepdim=True).clamp_min(1e-12)
-    clip_weights = clip_weights / clip_weights.norm(dim=0, keepdim=True).clamp_min(
-        1e-12
-    )
-    val_features = val_features / val_features.norm(dim=-1, keepdim=True).clamp_min(
-        1e-12
-    )
-    if test_features is not None:
-        test_features = test_features / test_features.norm(
-            dim=-1, keepdim=True
-        ).clamp_min(1e-12)
-
-    # -------------------------
-    # 1) dims
-    # -------------------------
-    Nval, D = val_features.shape
-    D2, C = clip_weights.shape
-    D3, Ncache = cache_keys.shape
-    Ncache2, C2 = cache_values.shape
-
-    if verbose:
-        print("\n" + "=" * 90)
-        print("🔍 SANITY CHECK Tip-Adapter (multi-backbone)")
-        print("=" * 90)
-        print("Backbone:", backbone)
-        print(
-            f"val_features : {tuple(val_features.shape)} {val_features.dtype} {val_features.device}"
-        )
-        print(
-            f"clip_weights : {tuple(clip_weights.shape)} {clip_weights.dtype} {clip_weights.device}"
-        )
-        print(
-            f"cache_keys   : {tuple(cache_keys.shape)} {cache_keys.dtype} {cache_keys.device}"
-        )
-        print(
-            f"cache_values : {tuple(cache_values.shape)} {cache_values.dtype} {cache_values.device}"
-        )
-
-    # shape constraints
-    assert D == D2 == D3, (
-        f"[SANITY Tip] D mismatch: val D={D}, clip_weights D={D2}, cache_keys D={D3}"
-    )
-    assert C == C2, f"[SANITY Tip] C mismatch: clip_weights C={C}, cache_values C={C2}"
-    assert Ncache == Ncache2, (
-        f"[SANITY Tip] Ncache mismatch: cache_keys N={Ncache}, cache_values N={Ncache2}"
-    )
-    assert val_labels.numel() == Nval, (
-        f"[SANITY Tip] val_labels size {val_labels.numel()} != Nval {Nval}"
-    )
-
-    # finite
-    _check_finite("val_features", val_features)
-    _check_finite("clip_weights", clip_weights)
-    _check_finite("cache_keys", cache_keys)
-    _check_finite("cache_values", cache_values)
-
-    # normalized?
-    if not _is_l2_normalized(val_features, dim=-1):
-        raise ValueError(
-            "[SANITY Tip] val_features not L2-normalized (did you forget feats/=norm?)"
-        )
-    if not _is_l2_normalized(clip_weights.t(), dim=-1):
-        # clip_weights is (D,C) -> weights vectors are columns, so check on transpose
-        raise ValueError("[SANITY Tip] clip_weights columns not L2-normalized")
-    if not _is_l2_normalized(cache_keys.t(), dim=-1):
-        # cache_keys is (D,N) -> keys vectors are columns
-        raise ValueError("[SANITY Tip] cache_keys columns not L2-normalized")
-
-    # -------------------------
-    # 2) Zero-shot logits
-    # -------------------------
-    clip_logits = 100.0 * (val_features @ clip_weights)  # (Nval, C)
-    _check_shape("clip_logits", clip_logits, (Nval, C))
-    _check_finite("clip_logits", clip_logits)
-
-    zs_pred = clip_logits.argmax(dim=1)
-    zs_acc = float((zs_pred == val_labels).float().mean().item()) * 100.0
-
-    if verbose:
-        print(f"[SANITY Tip] Zero-shot val acc (quick): {zs_acc:.2f}%")
-
-    # -------------------------
-    # 3) Tip-Adapter logits
-    # -------------------------
-    beta = float(cfg.get("init_beta", 1.0))
-    alpha = float(cfg.get("init_alpha", 1.0))
-
-    affinity = val_features @ cache_keys  # (Nval, Ncache)
-    _check_shape("affinity", affinity, (Nval, Ncache))
-    _check_finite("affinity", affinity)
-
-    cache_logits = ((-1) * (beta - beta * affinity)).exp() @ cache_values  # (Nval, C)
-    _check_shape("cache_logits", cache_logits, (Nval, C))
-    _check_finite("cache_logits", cache_logits)
-
-    tip_logits = clip_logits + cache_logits * alpha
-    _check_shape("tip_logits", tip_logits, (Nval, C))
-    _check_finite("tip_logits", tip_logits)
-
-    tip_pred = tip_logits.argmax(dim=1)
-    tip_acc = float((tip_pred == val_labels).float().mean().item()) * 100.0
-
-    if verbose:
-        print(f"[SANITY Tip] Tip-Adapter val acc (quick): {tip_acc:.2f}%")
-
-    # -------------------------
-    # 4) Optional: quick test set sanity
-    # -------------------------
-    if test_features is not None and test_labels is not None:
-        Nt, Dt = test_features.shape
-        assert Dt == D, f"[SANITY Tip] test D={Dt} != train/val D={D}"
-
-        clip_logits_t = 100.0 * (test_features @ clip_weights)
-        affinity_t = test_features @ cache_keys
-        cache_logits_t = ((-1) * (beta - beta * affinity_t)).exp() @ cache_values
-        tip_logits_t = clip_logits_t + cache_logits_t * alpha
-
-        _check_shape("tip_logits_test", tip_logits_t, (Nt, C))
-        _check_finite("tip_logits_test", tip_logits_t)
-
-        acc_t = (
-            float((tip_logits_t.argmax(dim=1) == test_labels).float().mean().item())
-            * 100.0
-        )
-        if verbose:
-            print(f"[SANITY Tip] Tip-Adapter test acc (quick): {acc_t:.2f}%")
-
-    # -------------------------
-    # 5) Tip-Adapter-F backward sanity
-    # -------------------------
-    if do_tip_adapter_f:
-        # adapter: Linear(D -> Ncache) with weight (Ncache, D)
-        adapter = nn.Linear(D, Ncache, bias=False).to(
-            device=device, dtype=torch.float32
-        )
-        adapter.weight = nn.Parameter(cache_keys.t().contiguous())  # (Ncache, D)
-
-        # mini-batch: take first few val samples
-        b = min(batch_size_f, Nval)
-        x = val_features[:b].detach()  # (b,D) already fp32
-        y = val_labels[:b].detach()
-
-        adapter.train()
-        for p in adapter.parameters():
-            p.grad = None
-
-        aff = adapter(x)  # (b, Ncache)
-        _check_shape("aff(adapter)", aff, (b, Ncache))
-
-        cache_logits_b = ((-1) * (beta - beta * aff)).exp() @ cache_values  # (b,C)
-        clip_logits_b = 100.0 * (x @ clip_weights)  # (b,C)
-        tip_logits_b = clip_logits_b + cache_logits_b * alpha  # (b,C)
-
-        loss = F.cross_entropy(tip_logits_b, y)
-        if not torch.isfinite(loss):
-            raise ValueError("[SANITY Tip] Tip-Adapter-F loss is NaN/Inf")
-
-        loss.backward()
-
-        # grads exist & finite only on adapter
-        g = adapter.weight.grad
-        if g is None:
-            raise ValueError(
-                "[SANITY Tip] adapter.weight.grad is None (no gradient flow?)"
-            )
-        if not torch.isfinite(g).all():
-            raise ValueError("[SANITY Tip] adapter.weight.grad has NaN/Inf")
-        gmean = float(g.detach().abs().mean().item())
-        if gmean == 0.0:
-            raise ValueError("[SANITY Tip] adapter grad mean abs is 0 (suspicious)")
-
-        if verbose:
-            print(
-                f"[SANITY Tip] Tip-Adapter-F backward OK | loss={float(loss.item()):.6f} | mean|grad|={gmean:.6e}"
-            )
-
-    if verbose:
-        print("✅ SANITY Tip-Adapter OK (shapes/dtypes/norms/logits/grads)")
-        print("=" * 90 + "\n")
-
-    return True
-
-
 FINISH_MARKERS = [
-    "Tip-Adapter-F's best test accuracy",  # ton exemple exact
-    "After fine-tuning, Tip-Adapter-F's best test accuracy",  # variante possible
+    "Tip-Adapter-F's best test accuracy",
+    "After fine-tuning, Tip-Adapter-F's best test accuracy",
 ]
 
 
 def run_is_completed(log_dir: Path) -> bool:
-    """
-    Retourne True si on détecte un signe clair que le run est terminé.
-    Cherche dans un .out/.log (le plus récent) la présence d'un marker final.
-    """
     if not log_dir.exists():
         return False
 
-    # Cherche un fichier de log plausible (adapte si tu as un nom fixe)
     candidates = []
     for pat in ("*.out", "*.log", "*.txt"):
         candidates += list(log_dir.glob(pat))
@@ -284,15 +40,13 @@ def run_is_completed(log_dir: Path) -> bool:
     if not candidates:
         return False
 
-    # Prend le plus récent
     log_path = max(candidates, key=lambda p: p.stat().st_mtime)
 
     try:
-        # Lire seulement la fin (évite de charger 200MB en RAM)
         with open(log_path, "rb") as f:
             f.seek(0, 2)
             size = f.tell()
-            f.seek(max(0, size - 200_000), 0)  # ~200KB
+            f.seek(max(0, size - 200_000), 0)
             tail = f.read().decode("utf-8", errors="ignore")
     except Exception:
         return False
@@ -320,7 +74,7 @@ def setup_logging(cfg, shot, seed):
     backbone = cfg["backbone"].replace("/", "")
 
     log_dir = Path(
-        f"/gpfs/projects/acad/coalap/mdausort/ISBI_sup/output/"
+        f"./Cytology_Benchmark/output/"
         f"{dataset}/{trainer}/{backbone}/{shot}shots/seed{seed}"
     )
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -328,7 +82,6 @@ def setup_logging(cfg, shot, seed):
     log_file = log_dir / "log.txt"
     f = open(log_file, "w")
 
-    # stdout/stderr -> fichier + stdout normal
     sys.stdout = Tee(sys.__stdout__, f)
     sys.stderr = sys.stdout
 
@@ -423,11 +176,9 @@ def clip_classifier(classnames, template, clip_model):
         clip_weights = []
 
         for classname in classnames:
-            # Tokenize the prompts
             classname = classname.replace("_", " ")
             texts = [t.format(classname) for t in template]
             texts = clip.tokenize(texts).to(device)
-            # prompt ensemble for ImageNet
             class_embeddings = clip_model.encode_text(texts)
             class_embeddings = class_embeddings / class_embeddings.norm(
                 dim=-1, keepdim=True
@@ -448,26 +199,23 @@ def biomedclip_classifier(classnames, templates, biomed_model, tokenizer, device
         clip_weights = []
         for classname in classnames:
             classname = classname.replace("_", " ")
-            texts = [t.format(classname) for t in templates]  # list[str]
+            texts = [t.format(classname) for t in templates]
 
-            # ✅ open_clip tokenizer: pas de padding/truncation kwargs
             tok = tokenizer(texts)
 
-            # open_clip peut renvoyer Tensor ou dict
             if isinstance(tok, dict):
                 input_ids = tok.get("input_ids", list(tok.values())[0])
                 input_ids = torch.as_tensor(input_ids).to(device)
             else:
                 input_ids = torch.as_tensor(tok).to(device)
 
-            # encode_text open_clip
-            class_embeds = biomed_model.encode_text(input_ids)  # (n_templates, D)
+            class_embeds = biomed_model.encode_text(input_ids)
             class_embeds = class_embeds / class_embeds.norm(dim=-1, keepdim=True)
             class_embed = class_embeds.mean(dim=0)
             class_embed = class_embed / class_embed.norm()
             clip_weights.append(class_embed)
 
-        clip_weights = torch.stack(clip_weights, dim=1).to(device)  # (D, n_cls)
+        clip_weights = torch.stack(clip_weights, dim=1).to(device)
 
     return clip_weights
 
@@ -483,21 +231,19 @@ def quilt_classifier(classnames, templates, quilt_model, tokenizer, device=None)
             texts = [t.format(classname) for t in templates]
 
             tok = tokenizer(texts)
-            # open_clip tokenizer: parfois dict, parfois tensor/list
             if isinstance(tok, dict):
                 input_ids = tok.get("input_ids", list(tok.values())[0])
                 input_ids = torch.as_tensor(input_ids).to(device)
             else:
                 input_ids = torch.as_tensor(tok).to(device)
 
-            # encode_text open_clip
-            class_embeds = quilt_model.encode_text(input_ids)  # (n_templates, D)
+            class_embeds = quilt_model.encode_text(input_ids)
             class_embeds = class_embeds / class_embeds.norm(dim=-1, keepdim=True)
             class_embed = class_embeds.mean(dim=0)
             class_embed = class_embed / class_embed.norm()
             clip_weights.append(class_embed)
 
-        clip_weights = torch.stack(clip_weights, dim=1).to(device)  # (D, n_cls)
+        clip_weights = torch.stack(clip_weights, dim=1).to(device)
     return clip_weights
 
 
@@ -511,9 +257,7 @@ def conch_classifier(classnames, templates, conch_model, tokenizer, device=None)
             classname = classname.replace("_", " ")
             texts = [t.format(classname) for t in templates]
 
-            # --- Tokenize robust ---
             tok = None
-            # 1) HF-style (works if tokenizer is a HF tokenizer)
             try:
                 tok = tokenizer(
                     texts,
@@ -523,11 +267,9 @@ def conch_classifier(classnames, templates, conch_model, tokenizer, device=None)
                     return_tensors="pt",
                 )
             except TypeError:
-                # 2) fallback: open_clip-style or custom
                 tok = tokenizer(texts)
 
             if isinstance(tok, dict) or hasattr(tok, "input_ids"):
-                # BatchEncoding or dict-like
                 input_ids = tok["input_ids"] if isinstance(tok, dict) else tok.input_ids
                 input_ids = input_ids.to(device)
             elif (
@@ -535,22 +277,19 @@ def conch_classifier(classnames, templates, conch_model, tokenizer, device=None)
                 and len(tok) > 0
                 and hasattr(tok[0], "ids")
             ):
-                # list[tokenizers.Encoding]
                 input_ids = torch.tensor(
                     [enc.ids for enc in tok], device=device, dtype=torch.long
                 )
             else:
-                # tensor / list[int] / list[list[int]]
                 input_ids = torch.as_tensor(tok, device=device, dtype=torch.long)
 
-            # --- Encode text ---
-            class_embeds = conch_model.encode_text(input_ids)  # (n_templates, D)
+            class_embeds = conch_model.encode_text(input_ids)
             class_embeds = class_embeds / class_embeds.norm(dim=-1, keepdim=True)
             class_embed = class_embeds.mean(dim=0)
             class_embed = class_embed / class_embed.norm()
             clip_weights.append(class_embed)
 
-        clip_weights = torch.stack(clip_weights, dim=1).to(device)  # (D, n_cls)
+        clip_weights = torch.stack(clip_weights, dim=1).to(device)
 
     return clip_weights
 
@@ -575,18 +314,17 @@ def pubmedclip_classifier(classnames, templates, clip_model, tokenizer, device=N
             )
             tok = {k: v.to(device) for k, v in tok.items()}
 
-            # HF CLIP: texte -> features projetées (dim CLIP)
             class_embeds = clip_model.get_text_features(
                 input_ids=tok["input_ids"],
                 attention_mask=tok["attention_mask"],
-            )  # (n_templates, D)
+            )
 
             class_embeds = class_embeds / class_embeds.norm(dim=-1, keepdim=True)
             class_embed = class_embeds.mean(dim=0)
             class_embed = class_embed / class_embed.norm()
             clip_weights.append(class_embed)
 
-        clip_weights = torch.stack(clip_weights, dim=1).to(device)  # (D, n_cls)
+        clip_weights = torch.stack(clip_weights, dim=1).to(device)
     return clip_weights
 
 
@@ -602,7 +340,6 @@ def build_cache_model(cfg, clip_model, train_loader_cache, shot):
         cache_values = []
 
         with torch.no_grad():
-            # Data augmentation for the cache model
             for augment_idx in range(cfg["augment_epoch"]):
                 train_features = []
 
@@ -645,7 +382,7 @@ def build_cache_biomed(cfg, biomed_model, train_loader_cache, shot):
         biomed_model.eval()
 
         device = next(biomed_model.parameters()).device
-        img_dtype = next(biomed_model.parameters()).dtype  # souvent fp16 si cuda
+        img_dtype = next(biomed_model.parameters()).dtype
 
         with torch.no_grad():
             for augment_idx in range(cfg["augment_epoch"]):
@@ -655,7 +392,6 @@ def build_cache_biomed(cfg, biomed_model, train_loader_cache, shot):
                 for images, target in tqdm(train_loader_cache):
                     images = images.to(device, non_blocking=True)
 
-                    # important: matcher le dtype du modèle (fp16 souvent)
                     image_features = biomed_model.encode_image(
                         images.to(dtype=img_dtype)
                     )
@@ -666,15 +402,13 @@ def build_cache_biomed(cfg, biomed_model, train_loader_cache, shot):
 
                 cache_keys.append(torch.cat(train_features, dim=0).unsqueeze(0))
 
-        # moyenne sur augmentations
-        cache_keys = torch.cat(cache_keys, dim=0).mean(dim=0)  # (N, D)
-        cache_keys = cache_keys / cache_keys.norm(dim=-1, keepdim=True)  # normalize
-        cache_keys = cache_keys.permute(1, 0).contiguous()  # (D, N)
+        cache_keys = torch.cat(cache_keys, dim=0).mean(dim=0)
+        cache_keys = cache_keys / cache_keys.norm(dim=-1, keepdim=True)
+        cache_keys = cache_keys.permute(1, 0).contiguous()
 
-        # values one-hot
         targets = torch.cat(cache_values, dim=0)
         num_classes = int(targets.max().item()) + 1
-        cache_values = F.one_hot(targets, num_classes=num_classes).half()  # (N, C)
+        cache_values = F.one_hot(targets, num_classes=num_classes).half()
 
         torch.save(cache_keys.cpu(), keys_path)
         torch.save(cache_values.cpu(), values_path)
@@ -696,9 +430,8 @@ def build_cache_pubmedclip(cfg, clip_model, train_loader_cache, shot):
         cache_keys = []
         cache_values = []
 
-        # dtype vision HF (souvent float32)
         vision_dtype = next(clip_model.vision_model.parameters()).dtype
-        device = next(clip_model.parameters()).device  # en pratique cuda
+        device = next(clip_model.parameters()).device
 
         with torch.no_grad():
             for augment_idx in range(cfg["augment_epoch"]):
@@ -710,7 +443,6 @@ def build_cache_pubmedclip(cfg, clip_model, train_loader_cache, shot):
                         device=device, dtype=vision_dtype, non_blocking=True
                     )
 
-                    # HF CLIPModel
                     image_features = clip_model.get_image_features(pixel_values=images)
                     train_features.append(image_features)
 
@@ -720,12 +452,9 @@ def build_cache_pubmedclip(cfg, clip_model, train_loader_cache, shot):
 
                 cache_keys.append(
                     torch.cat(train_features, dim=0).unsqueeze(0)
-                )  # (1, N, D)
+                )
 
-        # moyenne sur augmentations: (N, D)
         cache_keys = torch.cat(cache_keys, dim=0).mean(dim=0)
-
-        # L2 norm + transpose vers (D, N) comme Tip-Adapter
         cache_keys = cache_keys / cache_keys.norm(dim=-1, keepdim=True)
         cache_keys = cache_keys.permute(1, 0).contiguous()
         cache_values = F.one_hot(torch.cat(cache_values, dim=0)).half()
@@ -774,7 +503,7 @@ def pre_load_features_openclip(cfg, split, clip_model, loader):
     if not cfg["load_pre_feat"]:
         features, labels = [], []
         device = next(clip_model.parameters()).device
-        img_dtype = next(clip_model.parameters()).dtype  # souvent fp16
+        img_dtype = next(clip_model.parameters()).dtype
 
         with torch.no_grad():
             for images, target in tqdm(loader):
@@ -794,7 +523,6 @@ def pre_load_features_openclip(cfg, split, clip_model, loader):
         torch.save(labels, l_path)
 
     else:
-        # souvent tu veux charger CPU puis .to(device) plus tard
         features = torch.load(f_path, map_location=device)
         labels = torch.load(l_path, map_location=device)
 
@@ -802,11 +530,9 @@ def pre_load_features_openclip(cfg, split, clip_model, loader):
 
 
 def _unwrap_pixel_values(images):
-    # 1) Déjà un tensor batch (B,3,H,W)
     if torch.is_tensor(images):
         return images
 
-    # 2) dict / BatchFeature / BatchEncoding -> extraire puis re-unwrap
     if isinstance(images, dict) and "pixel_values" in images:
         pv = images["pixel_values"]
         return _unwrap_pixel_values(pv)
@@ -819,21 +545,18 @@ def _unwrap_pixel_values(images):
         pv = images.data["pixel_values"]
         return _unwrap_pixel_values(pv)
 
-    # 3) liste/tuple: unwrap chaque élément puis stack
     if isinstance(images, (list, tuple)):
         pvs = []
         for it in images:
-            pv = _unwrap_pixel_values(it)  # récursif
+            pv = _unwrap_pixel_values(it)
             pvs.append(pv)
 
-        # squeeze batch=1 éventuel
         pvs2 = []
         for pv in pvs:
             if torch.is_tensor(pv) and pv.dim() == 4 and pv.size(0) == 1:
                 pv = pv.squeeze(0)
             pvs2.append(pv)
 
-        # si on a des tensors (3,H,W) on stack -> (B,3,H,W)
         if all(torch.is_tensor(pv) for pv in pvs2):
             return torch.stack(pvs2, dim=0)
 
@@ -847,7 +570,7 @@ def pre_load_features_hfclip(cfg, split, clip_model, loader):
     l_path = os.path.join(cfg["cache_dir"], f"{split}_l.pt")
 
     device = next(clip_model.parameters()).device
-    vision_dtype = next(clip_model.vision_model.parameters()).dtype  # souvent fp32
+    vision_dtype = next(clip_model.vision_model.parameters()).dtype
 
     if not cfg["load_pre_feat"]:
         features, labels = [], []
@@ -856,28 +579,20 @@ def pre_load_features_hfclip(cfg, split, clip_model, loader):
 
                 pixel_values = _unwrap_pixel_values(images)
 
-                # DEBUG (à garder 1 run)
                 print("RAW pixel_values:", type(pixel_values), getattr(pixel_values, "shape", None))
 
-                # 1) si c'est une liste, on la convertit en tensor batch
                 if isinstance(pixel_values, (list, tuple)):
                     pixel_values = _unwrap_pixel_values(pixel_values)
 
-                # 2) squeeze toutes les dims "1" en trop au début (souvent (1,1,3,H,W) etc.)
                 while torch.is_tensor(pixel_values) and pixel_values.dim() > 4 and pixel_values.size(0) == 1:
                     pixel_values = pixel_values.squeeze(0)
 
-                # 3) cas fréquent: (B,1,3,H,W) -> (B,3,H,W)
                 if torch.is_tensor(pixel_values) and pixel_values.dim() == 5 and pixel_values.size(1) == 1:
                     pixel_values = pixel_values.squeeze(1)
 
-                # 4) si tu as (B,N,3,H,W) avec N>1, choisis une stratégie :
                 if torch.is_tensor(pixel_values) and pixel_values.dim() == 5 and pixel_values.size(1) > 1:
-                    # prendre la 1ère vue (simple)
                     pixel_values = pixel_values[:, 0]
-                    # ou moyenne des features (plus propre) -> je te donne si tu veux
 
-                # 5) image seule (3,H,W)
                 if torch.is_tensor(pixel_values) and pixel_values.dim() == 3:
                     pixel_values = pixel_values.unsqueeze(0)
 
@@ -920,7 +635,6 @@ def encode_image_any(model, images, kind):
         return model.encode_image(images.to(dtype=img_dtype))
 
     elif kind == "clip":
-        # OpenAI CLIP encode_image attends float32 en général
         return model.encode_image(images.float())
 
     else:
@@ -1064,7 +778,7 @@ def run_tip_adapter_F(
             )
         )
 
-        # Eval
+        # -------------------- Eval --------------------
         adapter.eval()
         with torch.no_grad():
             affinity_val = adapter(val_features)
@@ -1182,7 +896,7 @@ def main():
     trainer_log = "Tip-Adapter"
     backbone_log = cfg["backbone"].replace("/", "")
     log_dir = Path(
-        f"/gpfs/projects/acad/coalap/mdausort/ISBI_sup/output/"
+        f"./Cytology_Benchmark/output/"
         f"{dataset_log}/{trainer_log}/{backbone_log}/{args.shots}shots/seed{args.seed}"
     )
 
@@ -1207,7 +921,7 @@ def main():
     print("\nRunning configs.")
     print(cfg, "\n")
 
-    # ----------------------- MODEL -----------------------
+    # ----------------------- Model -----------------------
     clip_model, preprocess, extra = load_backbone_and_preprocess(cfg)
     clip_model = clip_model.to(device)
     clip_model.eval()

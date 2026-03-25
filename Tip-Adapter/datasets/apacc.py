@@ -34,7 +34,6 @@ class APACC(DatasetBase):
         val = self.read_txt_split(os.path.join(self.splits_dir, SPLIT_FILES["val"]))
         test = self.read_txt_split(os.path.join(self.splits_dir, SPLIT_FILES["test"]))
 
-        # few-shot “simple” (comme ton EuroSAT simple)
         train = self.generate_fewshot_dataset(train, num_shots=num_shots)
         val = self.generate_fewshot_dataset(val, num_shots=16)
 

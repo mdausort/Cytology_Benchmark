@@ -6,21 +6,21 @@ from dassl.config import get_cfg_default
 from dassl.engine import build_trainer
 
 # custom
-import datasets.apacc  # noqa # type: ignore
-import datasets.bcfc  # noqa # type: ignore
-import datasets.bloodmnist  # noqa # type: ignore
-import datasets.bmcd  # noqa # type: ignore
-import datasets.bmt  # noqa # type: ignore
-import datasets.eurosat  # noqa # type: ignore
-import datasets.fnac2019  # noqa # type: ignore
-import datasets.herlev  # noqa # type: ignore
-import datasets.hicervix  # noqa # type: ignore
-import datasets.mlcc  # noqa # type: ignore
-import datasets.sipakmed  # noqa # type: ignore
+import datasets.apacc
+import datasets.bcfc
+import datasets.bloodmnist
+import datasets.bmcd
+import datasets.bmt
+import datasets.eurosat
+import datasets.fnac2019
+import datasets.herlev
+import datasets.hicervix
+import datasets.mlcc
+import datasets.sipakmed
 
 
-import trainers.taskres  # noqa # type: ignore
-import trainers.zsclip  # noqa # type: ignore
+import trainers.taskres
+import trainers.zsclip
 
 
 def print_args(args, cfg):

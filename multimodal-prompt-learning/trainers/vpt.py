@@ -1,10 +1,14 @@
 import os.path as osp
+from collections import OrderedDict
+import math
+
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.cuda.amp import GradScaler, autocast
 
 from dassl.engine import TRAINER_REGISTRY, TrainerX
+from dassl.metrics import compute_accuracy
 from dassl.utils import load_pretrained_weights, load_checkpoint
 from dassl.optim import build_optimizer, build_lr_scheduler
 
@@ -26,7 +30,6 @@ def load_clip_to_cpu(cfg):
 
     except RuntimeError:
         state_dict = torch.load(model_path, map_location="cpu")
-
     design_details = {
         "trainer": "VPT",
         "vision_depth": cfg.TRAINER.VPT.PROMPT_DEPTH_VISION,
@@ -34,7 +37,6 @@ def load_clip_to_cpu(cfg):
         "language_depth": 0,
         "language_ctx": 0,
     }
-
     assert (
         cfg.TRAINER.VPT.PROMPT_DEPTH_VISION >= 1
     ), "For Vision Prompting, PROMPT_DEPTH_VISION should be >= 1"
@@ -69,62 +71,6 @@ class TextEncoder(nn.Module):
         return x
 
 
-class BiomedTextEncoder(nn.Module):
-    def __init__(self, biomedclip_model):
-        super().__init__()
-        self.text = biomedclip_model.text
-
-        emb = self.text.transformer.embeddings
-        self.word_embeddings = emb.word_embeddings
-        self.position_embeddings = emb.position_embeddings
-        self.token_type_embeddings = emb.token_type_embeddings
-        self.emb_layernorm = emb.LayerNorm
-        self.emb_dropout = emb.dropout
-
-    def forward(self, prompts, tokenized_prompts):
-
-        input_ids = tokenized_prompts
-        device = input_ids.device
-        dtype = self.word_embeddings.weight.dtype
-
-        attention_mask = (input_ids != 0).long()
-        token_type_ids = torch.zeros_like(input_ids)
-
-        B, L = input_ids.shape
-
-        if prompts is None:
-            # teacher: embeddings standards depuis ids
-            w = self.word_embeddings(input_ids).to(dtype)
-            t = self.token_type_embeddings(token_type_ids).to(dtype)
-            inputs_embeds = w + t
-        else:
-            # student: embeddings déjà prêts (prefix+ctx+suffix)
-            inputs_embeds = prompts.to(dtype)
-
-        # positions (Biomed/BERT a besoin de pos)
-        pos_ids = torch.arange(L, device=device).unsqueeze(0).expand(B, -1)
-        pos = self.position_embeddings(pos_ids).to(dtype)
-        inputs_embeds = inputs_embeds + pos
-
-        inputs_embeds = self.emb_layernorm(inputs_embeds)
-        inputs_embeds = self.emb_dropout(inputs_embeds)
-
-        out = self.text.transformer(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            return_dict=True,
-        )
-
-        last_hidden = (
-            out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
-        )
-        cls_pos = getattr(self.text.pooler, "cls_token_position", 0)
-        pooled = last_hidden[:, cls_pos, :]
-
-        return self.text.proj(pooled)
-
-
 class FixedEmbeddings:
     def __init__(self, cfg, classnames, clip_model):
         clip_imsize = clip_model.visual.input_resolution
@@ -139,7 +85,7 @@ class FixedEmbeddings:
         print(
             f"Number of context words (tokens) for Vision prompting: {cfg.TRAINER.VPT.N_CTX_VISION}"
         )
-        print("Using fixed hand crated prompts")
+        print(f"Using fixed hand crated prompts")
 
         classnames = [name.replace("_", " ") for name in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]

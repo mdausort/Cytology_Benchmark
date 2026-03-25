@@ -187,13 +187,7 @@ class EuroSAT(DatasetBase):
                             p_val=0.2,
                             ignored=[],
                             new_cnames=None):
-        # The data are supposed to be organized into the following structure
-        # =============
-        # images/
-        #     dog/
-        #     cat/
-        #     horse/
-        # =============
+
         categories = listdir_nohidden(image_dir)
         categories = [c for c in categories if c not in ignored]
         categories.sort()
@@ -207,7 +201,7 @@ class EuroSAT(DatasetBase):
             items = []
             for im in ims:
                 item = Datum(impath=im, label=y,
-                             classname=c)  # is already 0-based
+                             classname=c)
                 items.append(item)
             return items
 

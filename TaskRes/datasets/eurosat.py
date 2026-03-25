@@ -155,14 +155,13 @@ class EuroSAT(DatasetBase):
         labels = list(labels)
         labels.sort()
         n = len(labels)
-        # Divide classes into two halves
         m = math.ceil(n / 2)
 
         print(f"SUBSAMPLE {subsample.upper()} CLASSES!")
         if subsample == "base":
-            selected = labels[:m]  # take the first half
+            selected = labels[:m]
         else:
-            selected = labels[m:]  # take the second half
+            selected = labels[m:]
         relabeler = {y: y_new for y_new, y in enumerate(selected)}
 
         output = []
@@ -187,13 +186,7 @@ class EuroSAT(DatasetBase):
                             p_val=0.2,
                             ignored=[],
                             new_cnames=None):
-        # The data are supposed to be organized into the following structure
-        # =============
-        # images/
-        #     dog/
-        #     cat/
-        #     horse/
-        # =============
+
         categories = listdir_nohidden(image_dir)
         categories = [c for c in categories if c not in ignored]
         categories.sort()
@@ -207,7 +200,7 @@ class EuroSAT(DatasetBase):
             items = []
             for im in ims:
                 item = Datum(impath=im, label=y,
-                             classname=c)  # is already 0-based
+                             classname=c)
                 items.append(item)
             return items
 

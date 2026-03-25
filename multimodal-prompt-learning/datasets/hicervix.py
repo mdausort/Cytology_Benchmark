@@ -87,10 +87,7 @@ class HiCervix(DatasetBase):
         super().__init__(train_x=train, val=val, test=test)
 
     def read_txt_split(self, filepath):
-        """
-        Each line:  im_Dyskeratotic/073_02.bmp 0
-        Path is relative to images/ (i.e., images/<that_path>)
-        """
+
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Split file not found: {filepath}")
 
@@ -101,7 +98,6 @@ class HiCervix(DatasetBase):
                 if not line:
                     continue
 
-                # robust split: allow spaces/tabs
                 parts = line.split()
                 if len(parts) < 2:
                     raise ValueError(f"Bad line format in {filepath} at line {ln}: {line}")
@@ -109,13 +105,11 @@ class HiCervix(DatasetBase):
                 rel_impath = parts[0]
                 label = int(parts[1])
 
-                # classname from folder name (first component)
                 class_folder = rel_impath.split("/")[0]
                 classname = NEW_CNAMES.get(class_folder, class_folder)
 
                 impath = os.path.join(self.image_dir, rel_impath)
 
-                # optionnel: check existence (tu peux enlever si ça ralentit)
                 if not os.path.exists(impath):
                     raise FileNotFoundError(
                         f"Image not found (from split): {impath} (line {ln} in {filepath})"
@@ -132,13 +126,7 @@ class HiCervix(DatasetBase):
                             p_val=0.2,
                             ignored=[],
                             new_cnames=None):
-        # The data are supposed to be organized into the following structure
-        # =============
-        # images/
-        #     dog/
-        #     cat/
-        #     horse/
-        # =============
+
         categories = listdir_nohidden(image_dir)
         categories = [c for c in categories if c not in ignored]
         categories.sort()
@@ -152,7 +140,7 @@ class HiCervix(DatasetBase):
             items = []
             for im in ims:
                 item = Datum(impath=im, label=y,
-                             classname=c)  # is already 0-based
+                             classname=c)
                 items.append(item)
             return items
 
@@ -231,4 +219,3 @@ class HiCervix(DatasetBase):
                 )
             output.append(ds_new)
         return output
-

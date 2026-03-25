@@ -62,331 +62,12 @@ def print_param_report(m: nn.Module, prefix="[PARAMS]"):
             print(f"{prefix} {k:>13s} total/trainable = {kt:,} / {ktr:,} ({kpct:.4f}%)")
 
 
-@torch.no_grad()
-def _is_finite(x: torch.Tensor) -> bool:
-    return torch.isfinite(x).all().item()
-
-
-@torch.no_grad()
-def _max_abs(x: torch.Tensor) -> float:
-    return float(x.abs().max().item())
-
-
-def sanity_check_any_backbone(
-    trainer=None,
-    model: nn.Module | None = None,
-    batch: dict | None = None,
-    image_size: int = 224,
-    n_classes: int = 5,
-    device: str | torch.device | None = None,
-    check_grads: bool = True,
-    do_one_optim_step: bool = False,
-    verbose: bool = True,
-):
-    """
-    Sanity check robuste pour tous tes backbones/wrappers.
-
-    Hypothèses minimales:
-      - parse batch: dict avec "img" et optionnellement "label"
-      - forward du modèle idéalement: forward(image, label=None)
-        (mais on gère aussi forward(image) en fallback)
-      - en eval (label=None) le modèle doit retourner logits (Tensor) ou un dict/tuple contenant logits.
-      - en train (label != None) le modèle peut retourner loss (Tensor) ou logits (Tensor).
-
-    Notes:
-      - Si le modèle est totalement frozen (ex: texte fixed + pas de VPT) -> grads = 0 (normal).
-      - Si check_grads=True mais aucun paramètre trainable, on ne crash pas, on log juste.
-    """
-    assert trainer is not None or model is not None, "Donne trainer ou model"
-    m = model if model is not None else trainer.model
-    m = m.module if hasattr(m, "module") else m
-
-    # -------------------------
-    # device
-    # -------------------------
-    if device is None:
-        if trainer is not None:
-            device = trainer.device
-        else:
-            device = next(m.parameters()).device
-    device = torch.device(device)
-
-    # -------------------------
-    # batch
-    # -------------------------
-    if batch is None:
-        B = 2
-        img = torch.randn(B, 3, image_size, image_size, device=device)
-        lab = torch.randint(0, n_classes, (B,), device=device)
-        batch = {"img": img, "label": lab}
-    else:
-        img = batch["img"].to(device)
-        lab = batch.get("label", None)
-        if lab is not None:
-            lab = lab.to(device)
-
-    # -------------------------
-    # model dtype (best effort)
-    # -------------------------
-    try:
-        model_dtype = next(m.parameters()).dtype
-    except StopIteration:
-        model_dtype = torch.float32
-
-    if verbose:
-        print("\n" + "=" * 110)
-        print("[SANITY] model =", m.__class__.__name__)
-        print("[SANITY] device =", device, "| model_dtype =", model_dtype)
-        print("[SANITY] img =", tuple(img.shape), img.dtype)
-
-    # Helper: choose image dtype based on likely encoder
-    def _infer_img_dtype():
-        # cherche un conv1 (ou base.conv1 / vit.conv1) pour prendre son dtype (source de vérité)
-        for root in [
-            "image_encoder",
-            "visual",
-            "backbone",
-            "clip_model",
-            "biomed",
-            "clip",
-            "coca",
-        ]:
-            if not hasattr(m, root):
-                continue
-            enc = getattr(m, root)
-
-            # unwrap common wrappers
-            for attr in ["base", "vit", "visual"]:
-                if hasattr(enc, attr):
-                    enc2 = getattr(enc, attr)
-                    if hasattr(enc2, "conv1") and hasattr(enc2.conv1, "weight"):
-                        return enc2.conv1.weight.dtype
-
-            # direct conv1
-            if hasattr(enc, "conv1") and hasattr(enc.conv1, "weight"):
-                return enc.conv1.weight.dtype
-
-            # fallback: first real parameter dtype
-            if hasattr(enc, "parameters"):
-                try:
-                    return next(enc.parameters()).dtype
-                except StopIteration:
-                    pass
-
-        return model_dtype
-
-    img_for_model = img.to(dtype=_infer_img_dtype())
-
-    # -------------------------
-    # helper: safe forward
-    # -------------------------
-    def _safe_forward(
-        model_: nn.Module, image_: torch.Tensor, label_: torch.Tensor | None
-    ):
-        """
-        Essayes dans l'ordre:
-          1) model(image, label) si possible
-          2) model(image) si signature ne prend pas label
-        """
-        try:
-            return model_(image_, label_)
-        except TypeError:
-            # forward(image) only
-            return model_(image_)
-
-    def _extract_logits(out):
-        """
-        Retourne Tensor logits si possible.
-        """
-        if torch.is_tensor(out):
-            return out
-        if isinstance(out, (tuple, list)) and len(out) > 0:
-            if torch.is_tensor(out[0]):
-                return out[0]
-        if isinstance(out, dict):
-            for k in ["logits", "pred", "output"]:
-                if k in out and torch.is_tensor(out[k]):
-                    return out[k]
-        return None
-
-    def _extract_loss(out):
-        """
-        Retourne Tensor loss si possible.
-        """
-        if torch.is_tensor(out) and out.dim() == 0:
-            return out
-        if (
-            isinstance(out, (tuple, list))
-            and len(out) > 0
-            and torch.is_tensor(out[0])
-            and out[0].dim() == 0
-        ):
-            return out[0]
-        if (
-            isinstance(out, dict)
-            and "loss" in out
-            and torch.is_tensor(out["loss"])
-            and out["loss"].dim() == 0
-        ):
-            return out["loss"]
-        return None
-
-    # -------------------------
-    # 1) EVAL: forward logits
-    # -------------------------
-    m.eval()
-    with torch.no_grad():
-        out_eval = _safe_forward(m, img_for_model, None)
-
-    logits = _extract_logits(out_eval)
-
-    if verbose:
-        print("[SANITY][EVAL] output type =", type(out_eval))
-        if logits is None:
-            print("[SANITY][EVAL] could not extract logits tensor.")
-        else:
-            print("[SANITY][EVAL] logits shape =", tuple(logits.shape))
-            print(
-                "[SANITY][EVAL] logits finite =",
-                _is_finite(logits),
-                "| max|logit| =",
-                _max_abs(logits),
-            )
-            if logits.dim() >= 2 and logits.size(0) >= 2:
-                print("[SANITY][EVAL] logits[0] =", logits[0].detach().cpu())
-                print("[SANITY][EVAL] logits[1] =", logits[1].detach().cpu())
-                print(
-                    "[SANITY][EVAL] diff logits (max abs) =",
-                    float((logits[0] - logits[1]).abs().max().item()),
-                )
-
-    # -------------------------
-    # 2) TRAIN: forward loss (or logits->loss)
-    # -------------------------
-    m.train()
-    loss = None
-
-    if lab is None:
-        if verbose:
-            print("[SANITY][TRAIN] no labels provided -> skip loss test.")
-    else:
-        out_train = _safe_forward(m, img_for_model, lab)
-
-        # cas A: le modèle renvoie directement une loss
-        loss = _extract_loss(out_train)
-
-        # cas B: le modèle renvoie des logits -> on calcule CE ici
-        if loss is None:
-            logits_train = _extract_logits(out_train)
-            if logits_train is None:
-                raise RuntimeError(
-                    f"[SANITY][TRAIN] Train forward returned {type(out_train)} "
-                    "but I couldn't extract loss or logits."
-                )
-            loss = torch.nn.functional.cross_entropy(logits_train, lab)
-
-        if verbose:
-            print(
-                "[SANITY][TRAIN] loss =",
-                float(loss.item()),
-                "| finite =",
-                _is_finite(loss),
-            )
-
-    # -------------------------
-    # 3) Check logit_scale if present
-    # -------------------------
-    if hasattr(m, "logit_scale"):
-        ls = getattr(m, "logit_scale")
-        if torch.is_tensor(ls):
-            with torch.no_grad():
-                val = float(ls.detach().float().mean().item())
-            if verbose:
-                print("[SANITY] has logit_scale Tensor | mean =", val)
-        else:
-            if verbose:
-                print("[SANITY] has logit_scale (non-tensor) =", type(ls))
-
-    # -------------------------
-    # 4) Gradients check
-    # -------------------------
-    if check_grads and (lab is not None) and (loss is not None):
-        trainable = [p for p in m.parameters() if p.requires_grad]
-        if len(trainable) == 0:
-            if verbose:
-                print(
-                    "[SANITY][GRAD] No trainable parameters (all frozen) -> skip grads."
-                )
-        else:
-            for p in m.parameters():
-                p.grad = None
-
-            loss.backward()
-
-            grads = []
-            wrong = []
-            for name, p in m.named_parameters():
-                if p.requires_grad:
-                    hasg = (p.grad is not None) and torch.isfinite(p.grad).all().item()
-                    if hasg:
-                        grads.append(name)
-                else:
-                    if (p.grad is not None) and torch.isfinite(p.grad).all().item():
-                        wrong.append(name)
-
-            if verbose:
-                print(
-                    "[SANITY][GRAD] #params with finite grad (requires_grad=True) =",
-                    len(grads),
-                )
-                print("[SANITY][GRAD] example grads:", grads[:12])
-                if len(wrong) > 0:
-                    print(
-                        "[SANITY][GRAD][WARNING] grads on frozen params! examples:",
-                        wrong[:12],
-                    )
-
-                focus = [
-                    n
-                    for n in grads
-                    if ("prompt_learner" in n) or ("VPT" in n) or ("head" in n)
-                ]
-                print("[SANITY][GRAD] grads on prompt_learner/VPT/head =", len(focus))
-                print("[SANITY][GRAD] example focus:", focus[:12])
-
-    # -------------------------
-    # 5) Optional: one optimizer step
-    # -------------------------
-    if do_one_optim_step:
-        if trainer is None or not hasattr(trainer, "optim") or trainer.optim is None:
-            raise ValueError("do_one_optim_step=True requires trainer.optim")
-        if loss is None:
-            raise ValueError("Need labels/loss for optimizer step")
-
-        trainer.optim.step()
-        trainer.optim.zero_grad(set_to_none=True)
-        if verbose:
-            print("[SANITY][OPTIM] one step OK")
-
-    if verbose:
-        print("=" * 110 + "\n")
-
-    return {
-        "logits_shape": None if logits is None else tuple(logits.shape),
-        "loss": None if loss is None else float(loss.item()),
-        "logits_finite": None if logits is None else _is_finite(logits),
-        "loss_finite": None if loss is None else _is_finite(loss),
-    }
-
-
 def _get_openclip_token_embedding(model):
-    # 1) open_clip classic
     if hasattr(model, "token_embedding"):
         return model.token_embedding
     if hasattr(model, "text") and hasattr(model.text, "token_embedding"):
         return model.text.token_embedding
 
-    # 2) open_clip sometimes nests differently
     if (
         hasattr(model, "text")
         and hasattr(model.text, "transformer")
@@ -394,18 +75,14 @@ def _get_openclip_token_embedding(model):
     ):
         return model.text.transformer.token_embedding
 
-    # 3) HF-style text tower (e.g., PubMedBERT inside BiomedCLIP)
-    # open_clip HFTextEncoder often exposes `.transformer` as a HF PreTrainedModel
     if hasattr(model, "text") and hasattr(model.text, "transformer"):
         tr = model.text.transformer
 
-        # preferred: HF API
         if hasattr(tr, "get_input_embeddings"):
             emb = tr.get_input_embeddings()
             if emb is not None:
                 return emb
 
-        # common attribute paths
         for path in [
             ("embeddings", "word_embeddings"),
             ("text_model", "embeddings", "word_embeddings"),
@@ -431,15 +108,9 @@ def _get_openclip_token_embedding(model):
 
 
 def _get_openclip_text_module(model: nn.Module) -> nn.Module:
-    """
-    open_clip peut exposer le texte:
-      - soit via model.text (layout récent)
-      - soit directement sur model (layout CLIP-style / certains checkpoints hf-hub)
-    """
     if hasattr(model, "text"):
         return model.text
 
-    # layout "CLIP-style" : attributs texte au top-level
     has_top_level_text = (
         hasattr(model, "token_embedding")
         and hasattr(model, "transformer")
@@ -479,7 +150,6 @@ def _get_openclip_ln_final(model: nn.Module) -> nn.Module:
 
 
 def _get_openclip_text_projection(model: nn.Module):
-    # projection can be on model or model.text depending on checkpoint
     if hasattr(model, "text_projection"):
         return model.text_projection
     text = _get_openclip_text_module(model)
@@ -487,22 +157,19 @@ def _get_openclip_text_projection(model: nn.Module):
         return text.text_projection
     if hasattr(text, "proj"):
         return text.proj
-    return None  # sometimes projection is identity / absent
+    return None
 
 
 def _get_openclip_text_transformer(model: nn.Module) -> nn.Module:
     text = _get_openclip_text_module(model)
-    # open_clip TextTransformer often has .transformer (with resblocks)
     if hasattr(text, "transformer"):
         return text.transformer
-    # sometimes it is the transformer itself
     if hasattr(text, "resblocks"):
         return text
     raise AttributeError("Could not find text transformer module in open_clip text")
 
 
 def _openclip_transformer_batch_first(transformer: nn.Module) -> bool:
-    # best-effort: inspect first block's attn
     blocks = None
     if hasattr(transformer, "resblocks"):
         blocks = transformer.resblocks
@@ -516,13 +183,11 @@ def _openclip_transformer_batch_first(transformer: nn.Module) -> bool:
 
 
 def _hf_context_length(clip_model, tokenizer=None, default=77):
-    # 1) tokenizer (souvent le plus fiable)
     if tokenizer is not None and hasattr(tokenizer, "model_max_length"):
         ml = int(tokenizer.model_max_length)
-        if ml > 0 and ml < 10**6:  # HF met parfois 1e30
+        if ml > 0 and ml < 10**6:
             return ml
 
-    # 2) config CLIP
     cfg = getattr(clip_model, "config", None)
     if cfg is not None:
         text_cfg = getattr(cfg, "text_config", None)
@@ -531,21 +196,15 @@ def _hf_context_length(clip_model, tokenizer=None, default=77):
             if mpe is not None:
                 return int(mpe)
 
-    # 3) fallback classique CLIP
     return int(default)
 
 
 def tokenize_any(tokenizer, texts, context_length=None, device=None):
-    """
-    Retourne input_ids (B, L) torch.LongTensor.
-    - Si tokenizer HF: utilise padding/truncation.
-    - Si tokenizer open_clip: tokenizer(texts) direct, puis pad/truncate à context_length.
-    """
+
     if isinstance(texts, str):
         texts = [texts]
 
     try:
-        # HuggingFace style
         out = tokenizer(
             texts,
             padding="max_length",
@@ -556,7 +215,6 @@ def tokenize_any(tokenizer, texts, context_length=None, device=None):
         input_ids = out["input_ids"]
 
     except TypeError:
-        # open_clip style (pas de kwargs)
         input_ids = tokenizer(texts)
         if not torch.is_tensor(input_ids):
             input_ids = torch.as_tensor(input_ids)
@@ -726,12 +384,11 @@ class FixedTextFeatures(nn.Module):
     def __init__(self, classnames, clip_model, prompt_prefix="a photo of a"):
         super().__init__()
         prompts = [f"{prompt_prefix} {c.replace('_', ' ')}." for c in classnames]
-        tokenized = torch.cat([clip.tokenize(p) for p in prompts])  # (n_cls, 77)
+        tokenized = torch.cat([clip.tokenize(p) for p in prompts])
 
         dev = next(clip_model.parameters()).device
         tokenized = tokenized.to(dev)
 
-        # dtype "vérité" pour le texte = dtype du transformer texte
         text_dtype = clip_model.token_embedding.weight.dtype
 
         with torch.no_grad():
@@ -766,7 +423,7 @@ class FixedEmbeddingsBiomed(nn.Module):
         with torch.no_grad():
             input_ids = tokenize_any(
                 tokenizer, prompts, context_length=context_length, device=device
-            )  # (n_cls, L)
+            )
 
             text_features = biomed_model.encode_text(input_ids).to(dtype=dtype)
             text_features = text_features / text_features.norm(
@@ -780,10 +437,6 @@ class FixedEmbeddingsBiomed(nn.Module):
 
 
 class FixedEmbeddingsQuilt(nn.Module):
-    """
-    Texte fixed (par classe) calculé une fois avec open_clip / Quilt.
-    Utilisé quand PROMPT_DEPTH_TEXT == 0 (ou N_CTX_TEXT == 0).
-    """
 
     def __init__(self, cfg, classnames, quilt_model, tokenizer):
         super().__init__()
@@ -794,14 +447,12 @@ class FixedEmbeddingsQuilt(nn.Module):
         classnames = [c.replace("_", " ") for c in classnames]
         prompts = [f"{prompt_prefix} {c}." for c in classnames]
 
-        # tokenizer open_clip: selon version, retourne tensor ou dict
         tok = tokenizer(prompts)
         if isinstance(tok, dict):
             tok = tok.get("input_ids", tok[list(tok.keys())[0]])
         tok = torch.as_tensor(tok, device=device)
 
         with torch.no_grad():
-            # open_clip fournit encode_text
             text_features = quilt_model.encode_text(tok).to(dtype=dtype)
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
@@ -812,10 +463,6 @@ class FixedEmbeddingsQuilt(nn.Module):
 
 
 class FixedEmbeddingsConch(nn.Module):
-    """
-    Texte fixed (par classe) calculé une fois avec open_clip / conch.
-    Utilisé quand PROMPT_DEPTH_TEXT == 0.
-    """
 
     def __init__(self, cfg, classnames, model, tokenizer):
         super().__init__()
@@ -870,7 +517,6 @@ class FixedEmbeddingsPubMed(nn.Module):
         attn = tok["attention_mask"].to(device)
 
         with torch.no_grad():
-            # HF CLIP: get_text_features renvoie déjà la projection
             feats = clip_model.get_text_features(
                 input_ids=input_ids, attention_mask=attn
             )
@@ -898,10 +544,10 @@ class TextEncoder(nn.Module):
         pos = self.positional_embedding.to(dtype=tr_dtype)
 
         x = prompts + pos
-        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = x.permute(1, 0, 2)
         x = x.to(dtype=tr_dtype)
         x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = x.permute(1, 0, 2)
         x = self.ln_final(x).to(dtype=tr_dtype)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
@@ -922,11 +568,6 @@ def _is_hf_text_tower(model) -> bool:
 
 
 class TextEncoderBiomed(nn.Module):
-    """
-    Encodeur texte robuste:
-    - si text tower = open_clip TextTransformer => chemin "CLIP-like" (ton ancien TextEncoderOpenCLIP)
-    - si text tower = HF (PubMedBERT) => on passe inputs_embeds à HF transformer
-    """
 
     def __init__(self, biomed_model: nn.Module, pad_id: int = 0):
         super().__init__()
@@ -936,7 +577,6 @@ class TextEncoderBiomed(nn.Module):
         self.is_hf = _is_hf_text_tower(biomed_model)
 
         if not self.is_hf:
-            # --- open_clip / CLIP-like ---
             self.token_embedding = _get_openclip_token_embedding(biomed_model)
             self.positional_embedding = _get_openclip_positional_embedding(biomed_model)
             self.ln_final = _get_openclip_ln_final(biomed_model)
@@ -944,33 +584,28 @@ class TextEncoderBiomed(nn.Module):
             self.text_projection = _get_openclip_text_projection(biomed_model)
             self.batch_first = _openclip_transformer_batch_first(self.transformer)
         else:
-            # --- HF / BERT-like ---
-            self.transformer = biomed_model.text.transformer  # HF model
+            self.transformer = biomed_model.text.transformer
             self.text_projection = _get_openclip_text_projection(
                 biomed_model
-            )  # often exists on biomed_model or text
+            )
 
     def _replace_ctx_tokens(self, x, deep_ctx, n_ctx: int, batch_first: bool):
-        # x: (B,L,D) if batch_first else (L,B,D)
-        # deep_ctx: (B,n_ctx,D)
         if batch_first:
             x = x.clone()
             x[:, 1 : 1 + n_ctx, :] = deep_ctx
             return x
         else:
             x = x.clone()
-            x[1 : 1 + n_ctx, :, :] = deep_ctx.permute(1, 0, 2)  # (n_ctx,B,D)
+            x[1 : 1 + n_ctx, :, :] = deep_ctx.permute(1, 0, 2)
             return x
 
     def forward(self, prompts_emb, tokenized_prompts, deep_prompts=None, n_ctx=None):
         device = prompts_emb.device
-        attn = (tokenized_prompts != self.pad_id).long().to(device=device)  # (B,L)
+        attn = (tokenized_prompts != self.pad_id).long().to(device=device)
 
-        # ---- Garde ton code HF actuel (BERT-like) ----
         tr = self.transformer
-        x = prompts_emb  # (B,L,H)
+        x = prompts_emb
 
-        # locate layers (ton code actuel)
         layers = None
         if hasattr(tr, "encoder") and hasattr(tr.encoder, "layer"):
             layers = tr.encoder.layer
@@ -991,7 +626,7 @@ class TextEncoderBiomed(nn.Module):
         max_depth = len(layers)
         depth = min(int(deep_prompts.size(0)) + 1, max_depth + 1) if use_deep else 1
 
-        ext = attn[:, None, None, :].to(dtype=x.dtype)  # (B,1,1,L)
+        ext = attn[:, None, None, :].to(dtype=x.dtype)
         ext = (1.0 - ext) * torch.finfo(x.dtype).min
 
         hidden = x
@@ -999,7 +634,7 @@ class TextEncoderBiomed(nn.Module):
             if use_deep and (1 <= i < depth):
                 dc = deep_prompts[i - 1].to(
                     device=hidden.device, dtype=hidden.dtype
-                )  # (B,n_ctx,H)
+                )
                 hidden = hidden.clone()
                 hidden[:, 1 : 1 + int(n_ctx), :] = dc
 
@@ -1017,7 +652,7 @@ class TextEncoderBiomed(nn.Module):
                 else getattr(out, "last_hidden_state", out)
             )
 
-        last = hidden  # (B,L,H)
+        last = hidden
         idx = tokenized_prompts.argmax(dim=-1)
         feats = last[torch.arange(last.size(0), device=last.device), idx, :]
 
@@ -1031,11 +666,6 @@ class TextEncoderBiomed(nn.Module):
 
 
 class TextEncoderConch(nn.Module):
-    """
-    Encodeur texte robuste:
-    - si text tower = open_clip TextTransformer => chemin "CLIP-like" (ton ancien TextEncoderOpenCLIP)
-    - si text tower = HF (PubMedBERT) => on passe inputs_embeds à HF transformer
-    """
 
     def __init__(self, biomed_model: nn.Module, pad_id: int = 0):
         super().__init__()
@@ -1045,7 +675,6 @@ class TextEncoderConch(nn.Module):
         self.is_hf = _is_hf_text_tower(biomed_model)
 
         if not self.is_hf:
-            # --- open_clip / CLIP-like ---
             self.token_embedding = _get_openclip_token_embedding(biomed_model)
             self.positional_embedding = _get_openclip_positional_embedding(biomed_model)
             self.ln_final = _get_openclip_ln_final(biomed_model)
@@ -1053,42 +682,34 @@ class TextEncoderConch(nn.Module):
             self.text_projection = _get_openclip_text_projection(biomed_model)
             self.batch_first = _openclip_transformer_batch_first(self.transformer)
         else:
-            # --- HF / BERT-like ---
-            self.transformer = biomed_model.text.transformer  # HF model
+            self.transformer = biomed_model.text.transformer
             self.text_projection = _get_openclip_text_projection(
                 biomed_model
-            )  # often exists on biomed_model or text
+            )
 
     def _replace_ctx_tokens(self, x, deep_ctx, n_ctx: int, batch_first: bool):
-        # x: (B,L,D) if batch_first else (L,B,D)
-        # deep_ctx: (B,n_ctx,D)
         if batch_first:
             x = x.clone()
             x[:, 1 : 1 + n_ctx, :] = deep_ctx
             return x
         else:
             x = x.clone()
-            x[1 : 1 + n_ctx, :, :] = deep_ctx.permute(1, 0, 2)  # (n_ctx,B,D)
+            x[1 : 1 + n_ctx, :, :] = deep_ctx.permute(1, 0, 2)
             return x
 
     def forward(self, prompts_emb, tokenized_prompts, deep_prompts=None, n_ctx=None):
         device = prompts_emb.device
-        attn = (tokenized_prompts != self.pad_id).long().to(device=device)  # (B,L)
+        attn = (tokenized_prompts != self.pad_id).long().to(device=device)
 
-        # ==========================
-        # ---- OPEN_CLIP / CONCH ----
-        # ==========================
-        # prompts_emb ici = embeddings (B,L,D) déjà construits par PromptLearner (prefix+ctx+suffix)
         x = prompts_emb.to(dtype=self.positional_embedding.dtype)
 
-        # 1) ajouter positional embedding (CLIP-like)
         pos = self.positional_embedding.to(
             device=device, dtype=x.dtype
-        )  # (L,D) ou (1,L,D)
+        )
         if pos.dim() == 2:
-            x = x + pos.unsqueeze(0)  # (B,L,D)
+            x = x + pos.unsqueeze(0)
         else:
-            x = x + pos  # déjà broadcastable
+            x = x + pos
 
         use_deep = (
             (deep_prompts is not None)
@@ -1096,31 +717,26 @@ class TextEncoderConch(nn.Module):
             and (deep_prompts.numel() > 0)
         )
         if use_deep:
-            # deep_prompts de ton PromptLearner: (depth-1, n_cls, n_ctx, D)
-            # on les appliquera juste avant certains blocks comme tu faisais, mais avec la BONNE mise en forme
             pass
 
-        # 2) transformer: gérer batch_first vs LBD
         tr = self.transformer
-        # open_clip text transformer: soit un module avec .resblocks, soit directement une liste
         blocks = tr.resblocks if hasattr(tr, "resblocks") else tr
         batch_first = bool(
             getattr(getattr(blocks[0], "attn", None), "batch_first", False)
         )
 
-        # Option: profondeur effective pour deep prompts
         v_depth = 1
         if use_deep:
             v_depth = min(int(deep_prompts.size(0)) + 1, len(blocks) + 1)
 
         if not batch_first:
-            x = x.permute(1, 0, 2)  # (L,B,D)
+            x = x.permute(1, 0, 2)
 
         for i, blk in enumerate(blocks):
             if use_deep and (1 <= i < v_depth):
                 dc = deep_prompts[i - 1].to(
                     device=device, dtype=x.dtype
-                )  # (B, n_ctx_eff, D)
+                )
                 n_ctx_eff = dc.size(1)
 
                 if batch_first:
@@ -1133,16 +749,13 @@ class TextEncoderConch(nn.Module):
             x = blk(x)
 
         if not batch_first:
-            x = x.permute(1, 0, 2)  # (B,L,D)
+            x = x.permute(1, 0, 2)
 
-        # 3) ln_final
         x = self.ln_final(x)
 
-        # 4) prendre le dernier non-pad (robuste)
         idx = (attn.sum(dim=1) - 1).clamp(min=0)
-        feats = x[torch.arange(x.size(0), device=device), idx, :]  # (B,D)
+        feats = x[torch.arange(x.size(0), device=device), idx, :]
 
-        # 5) projection
         proj = self.text_projection
         if proj is not None:
             if torch.is_tensor(proj):
@@ -1161,14 +774,14 @@ class TextEncoderHFCLIP(nn.Module):
 
         self.text_model = clip_model.text_model
         self.layers = self.text_model.encoder.layers
-        self.text_projection = clip_model.text_projection  # Linear
+        self.text_projection = clip_model.text_projection
 
     def forward(
         self,
-        prompts_emb: torch.Tensor,  # (n_cls, L, H) inputs_embeds
-        input_ids: torch.Tensor,  # (n_cls, L) juste pour eos_pos / mask
-        attention_mask: torch.Tensor,  # (n_cls, L)
-        deep_ctx: torch.Tensor | None,  # (depth-1, n_cls, n_ctx, H) ou None
+        prompts_emb: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        deep_ctx: torch.Tensor | None,
         n_ctx: int,
     ) -> torch.Tensor:
         device = prompts_emb.device
@@ -1177,8 +790,6 @@ class TextEncoderHFCLIP(nn.Module):
         use_deep = (deep_ctx is not None) and (deep_ctx.numel() > 0) and (n_ctx > 0)
         depth_eff = min((deep_ctx.size(0) + 1) if use_deep else 1, len(self.layers) + 1)
 
-        # HF extended attn mask
-        # shape attendue: (B, 1, 1, L)
         attn = attention_mask[:, None, None, :].to(dtype=x.dtype, device=device)
         attn = (1.0 - attn) * torch.finfo(x.dtype).min
 
@@ -1187,12 +798,11 @@ class TextEncoderHFCLIP(nn.Module):
             if use_deep and (1 <= i < depth_eff):
                 dc = deep_ctx[i - 1].to(
                     device=device, dtype=hidden.dtype
-                )  # (B, n_ctx_eff, H)
+                )
                 n_ctx_eff = dc.size(1)
                 hidden = hidden.clone()
                 hidden[:, 1 : 1 + n_ctx_eff, :] = dc
 
-            # versions HF: parfois layer(...) veut attention_mask, parfois aussi causal_attention_mask
             sig = inspect.signature(layer.forward)
             kwargs = {}
             if "attention_mask" in sig.parameters:
@@ -1202,11 +812,10 @@ class TextEncoderHFCLIP(nn.Module):
             out = layer(hidden, **kwargs)
             hidden = out[0] if isinstance(out, (tuple, list)) else out
 
-        # pool : comme HF CLIP (eot)
         eos_pos = input_ids.argmax(dim=-1)
-        pooled = hidden[torch.arange(hidden.size(0), device=device), eos_pos]  # (B,H)
+        pooled = hidden[torch.arange(hidden.size(0), device=device), eos_pos]
 
-        feats = self.text_projection(pooled)  # (B,D)
+        feats = self.text_projection(pooled)
         return feats
 
 
@@ -1214,7 +823,6 @@ class VLPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
         n_cls = len(classnames)
-        # Make sure Language depth >= 1
         assert cfg.TRAINER.IVLP.PROMPT_DEPTH_TEXT >= 1, (
             "In Independent VL prompting, Language prompt depth should be >=1"
             "\nPlease use VPT trainer if you want to learn only vision "
@@ -1232,7 +840,6 @@ class VLPromptLearner(nn.Module):
         )
 
         if ctx_init and (n_ctx) <= 4:
-            # use given words to initialize context vectors
             ctx_init = ctx_init.replace("_", " ")
             n_ctx = n_ctx
             prompt = clip.tokenize(ctx_init)
@@ -1241,7 +848,6 @@ class VLPromptLearner(nn.Module):
             ctx_vectors = embedding[0, 1 : 1 + n_ctx, :]
             prompt_prefix = ctx_init
         else:
-            # random initialization
             ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=dtype)
             nn.init.normal_(ctx_vectors, std=0.02)
             prompt_prefix = " ".join(["X"] * n_ctx)
@@ -1259,26 +865,19 @@ class VLPromptLearner(nn.Module):
 
         tokenized_prompts = torch.cat(
             [clip.tokenize(p) for p in prompts]
-        )  # (n_cls, n_tkn)
+        )
         with torch.no_grad():
             embedding = clip_model.token_embedding(tokenized_prompts).type(dtype)
 
-        # These token vectors will be saved when in save_model(),
-        # but they should be ignored in load_model() as we want to use
-        # those computed using the current class names
-        self.register_buffer("token_prefix", embedding[:, :1, :])  # SOS
-        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])  # CLS, EOS
+        self.register_buffer("token_prefix", embedding[:, :1, :])
+        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])
 
         self.n_cls = n_cls
         self.n_ctx = n_ctx
-        self.tokenized_prompts = tokenized_prompts  # torch.Tensor
+        self.tokenized_prompts = tokenized_prompts 
         self.name_lens = name_lens
 
     def construct_prompts(self, ctx, prefix, suffix, label=None):
-        # dim0 is either batch_size (during training) or n_cls (during testing)
-        # ctx: context tokens, with shape of (dim0, n_ctx, ctx_dim)
-        # prefix: the sos token, with shape of (n_cls, 1, ctx_dim)
-        # suffix: remaining tokens, with shape of (n_cls, *, ctx_dim)
 
         if label is not None:
             prefix = prefix[label]
@@ -1323,23 +922,20 @@ class BiomedVLPromptLearner(nn.Module):
 
         dtype = word_embeddings.weight.dtype
 
-        # -------------------------
-        # 1) Init ctx (CTX_INIT ou random)
-        # -------------------------
         if ctx_init and (self.n_ctx) <= 4:
             ctx_init = ctx_init.replace("_", " ")
             n_ctx = len(ctx_init.split(" "))
 
-            tok = tokenizer([ctx_init])  # open_clip tokenizer -> Tensor (1, L)
+            tok = tokenizer([ctx_init])
             if isinstance(tok, dict):
                 tok = tok["input_ids"]
             tok = tok.to(device)
             ids = tok[0]
-            content = ids[1:]  # skip CLS
-            ids_ctx = content[:n_ctx]  # (n_ctx,)
+            content = ids[1:]
+            ids_ctx = content[:n_ctx]
 
             with torch.no_grad():
-                ctx_vectors = word_embeddings(ids_ctx).to(dtype)  # (n_ctx, H)
+                ctx_vectors = word_embeddings(ids_ctx).to(dtype)
             prompt_prefix = ctx_init
 
         else:
@@ -1352,35 +948,34 @@ class BiomedVLPromptLearner(nn.Module):
         print(f"Number of context tokens: {self.n_ctx}")
 
         self.ctx = nn.Parameter(ctx_vectors)
-        # deep ctx (layers 1..depth_t-1), si depth_t > 1
         if self.depth_t > 1:
             deep_ctx = torch.empty(
                 self.depth_t - 1, self.n_ctx, hidden_size, dtype=dtype
             )
             nn.init.normal_(deep_ctx, std=0.02)
-            self.ctx_deep = nn.Parameter(deep_ctx)  # (depth_t-1, n_ctx, dim)
+            self.ctx_deep = nn.Parameter(deep_ctx)
         else:
             self.ctx_deep = None
 
         classnames = [name.replace("_", " ") for name in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]
 
-        tokenized_prompts = tokenizer(prompts)  # open_clip tokenizer
+        tokenized_prompts = tokenizer(prompts)
         if isinstance(tokenized_prompts, dict):
             tokenized_prompts = tokenized_prompts["input_ids"]
-        tokenized_prompts = tokenized_prompts.to(device)  # (n_cls, L)
+        tokenized_prompts = tokenized_prompts.to(device)
 
         self.tokenized_prompts = tokenized_prompts
 
         with torch.no_grad():
             embedding = word_embeddings(tokenized_prompts).type(dtype)
 
-        self.register_buffer("token_prefix", embedding[:, :1, :])  # SOS
+        self.register_buffer("token_prefix", embedding[:, :1, :])
         self.register_buffer(
             "token_suffix", embedding[:, 1 + self.n_ctx :, :]
-        )  # CLS, EOS
+        )
 
-        self.tokenized_prompts = tokenized_prompts  # torch.Tensor
+        self.tokenized_prompts = tokenized_prompts
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def construct_prompts(self, ctx, prefix, suffix, label=None):
@@ -1410,7 +1005,6 @@ class BiomedVLPromptLearner(nn.Module):
         if self.ctx_deep is None:
             return prompts, None
 
-        # (depth-1, n_ctx, dim) -> (depth-1, n_cls, n_ctx, dim)
         deep = self.ctx_deep.unsqueeze(1).expand(-1, self.n_cls, -1, -1)
         return prompts, deep
 
@@ -1420,8 +1014,6 @@ class QuiltVLPromptLearner(nn.Module):
         super().__init__()
         self.n_cls = len(classnames)
 
-        # prends IVLP si tu es dans IVLP, sinon COOP
-        # (adapte si tu veux absolument COOP.*)
         ctx_init = cfg.TRAINER.IVLP.CTX_INIT
         n_ctx = int(cfg.TRAINER.IVLP.N_CTX_TEXT)
         depth_t = int(cfg.TRAINER.IVLP.PROMPT_DEPTH_TEXT)
@@ -1433,14 +1025,9 @@ class QuiltVLPromptLearner(nn.Module):
         token_embedding = _get_openclip_token_embedding(quilt_model)
         ctx_dim = int(token_embedding.weight.shape[1])
 
-        # -------------------------
-        # 1) init ctx (ctx_init ou random) -> ctx0 (pour layer0)
-        # -------------------------
         if ctx_init and n_ctx > 0:
             ctx_init = ctx_init.replace("_", " ")
             prompt_prefix = ctx_init
-            # si ctx_init a plus de mots que n_ctx, tu peux tronquer ou forcer n_ctx = len(...)
-            # je fais comme ton code: n_ctx = nb mots
             n_ctx = len(ctx_init.split(" "))
             self.n_ctx = n_ctx
 
@@ -1451,29 +1038,22 @@ class QuiltVLPromptLearner(nn.Module):
                 tok = torch.as_tensor(tok)
 
             with torch.no_grad():
-                emb = token_embedding(tok).type(dtype)  # (1, L, dim)
-            ctx_vectors = emb[0, 1 : 1 + n_ctx, :].clone()  # (n_ctx, dim)
+                emb = token_embedding(tok).type(dtype)
+            ctx_vectors = emb[0, 1 : 1 + n_ctx, :].clone()
         else:
             print("Initializing a generic context")
             ctx_vectors = torch.empty(self.n_ctx, ctx_dim, dtype=dtype)
             prompt_prefix = " ".join(["X"] * self.n_ctx)
             nn.init.normal_(ctx_vectors, std=0.02)
 
-        # -------------------------
-        # 2) paramètres deep: ctx_layers
-        # -------------------------
         self.ctx = nn.Parameter(ctx_vectors)
-        # deep ctx (layers 1..depth_t-1), si depth_t > 1
         if self.depth_t > 1:
             deep_ctx = torch.empty(self.depth_t - 1, self.n_ctx, ctx_dim, dtype=dtype)
             nn.init.normal_(deep_ctx, std=0.02)
-            self.ctx_deep = nn.Parameter(deep_ctx)  # (depth_t-1, n_ctx, dim)
+            self.ctx_deep = nn.Parameter(deep_ctx)
         else:
             self.ctx_deep = None
 
-        # -------------------------
-        # 3) construire tokenized_prompts + token_prefix/suffix (CLIP-like)
-        # -------------------------
         classnames = [c.replace("_", " ") for c in classnames]
         prompts = [f"{prompt_prefix} {name}.".strip() for name in classnames]
 
@@ -1484,26 +1064,22 @@ class QuiltVLPromptLearner(nn.Module):
             )
         else:
             tokenized = torch.as_tensor(tokenized)
-        self.tokenized_prompts = tokenized  # (n_cls, L)
+        self.tokenized_prompts = tokenized
 
         with torch.no_grad():
             embedding = token_embedding(self.tokenized_prompts).type(
                 dtype
-            )  # (n_cls, L, dim)
+            )
 
-        # même convention que ton code:
-        # prefix = SOS (1 token)
-        # suffix = CLS/EOS/..., c-à-d tout après 1+n_ctx
         self.register_buffer(
             "token_prefix", embedding[:, :1, :], persistent=False
-        )  # (n_cls,1,dim)
+        )
         self.register_buffer(
             "token_suffix", embedding[:, 1 + self.n_ctx :, :], persistent=False
         )
 
     def construct_prompts(self, ctx_for_classes, prefix, suffix):
-        # ctx_for_classes: (n_cls, n_ctx, dim)
-        return torch.cat([prefix, ctx_for_classes, suffix], dim=1)  # (n_cls, L, dim)
+        return torch.cat([prefix, ctx_for_classes, suffix], dim=1)
 
     def forward(self):
         ctx = self.ctx
@@ -1515,7 +1091,6 @@ class QuiltVLPromptLearner(nn.Module):
         if self.ctx_deep is None:
             return prompts, None
 
-        # (depth-1, n_ctx, dim) -> (depth-1, n_cls, n_ctx, dim)
         deep = self.ctx_deep.unsqueeze(1).expand(-1, self.n_cls, -1, -1)
         return prompts, deep
 
@@ -1540,12 +1115,8 @@ class ConchVLPromptLearner(nn.Module):
         dtype = next(conch_model.parameters()).dtype
         ctx_dim = int(conch_model.text.ln_final.weight.shape[0])
 
-        # embedding module
-        te = conch_model.text.token_embedding  # nn.Embedding
+        te = conch_model.text.token_embedding
 
-        # -------------------------
-        # 1) init ctx0 (layer 0)
-        # -------------------------
         if ctx_init and (n_ctx > 0):
             ctx_init = ctx_init.replace("_", " ")
             prompt_prefix = ctx_init
@@ -1558,33 +1129,26 @@ class ConchVLPromptLearner(nn.Module):
                 truncation=True,
                 max_length=max_len,
                 return_tensors="pt",
-            )["input_ids"]  # (1, 77)
+            )["input_ids"]
 
             with torch.no_grad():
-                emb = te(tok).type(dtype)  # (1, 77, dim)
+                emb = te(tok).type(dtype)
 
-            ctx_vectors = emb[0, 1 : 1 + n_ctx, :].clone()  # après BOS
+            ctx_vectors = emb[0, 1 : 1 + n_ctx, :].clone()
         else:
             print("Initializing a generic context")
             ctx_vectors = torch.empty(self.n_ctx, ctx_dim, dtype=dtype)
             prompt_prefix = " ".join(["X"] * self.n_ctx)
             nn.init.normal_(ctx_vectors, std=0.02)
 
-        # -------------------------
-        # 2) paramètres deep: ctx_layers
-        # -------------------------
         self.ctx = nn.Parameter(ctx_vectors)
-        # deep ctx (layers 1..depth_t-1), si depth_t > 1
         if self.depth_t > 1:
             deep_ctx = torch.empty(self.depth_t - 1, self.n_ctx, ctx_dim, dtype=dtype)
             nn.init.normal_(deep_ctx, std=0.02)
-            self.ctx_deep = nn.Parameter(deep_ctx)  # (depth_t-1, n_ctx, dim)
+            self.ctx_deep = nn.Parameter(deep_ctx)
         else:
             self.ctx_deep = None
 
-        # -------------------------
-        # 3) tokenized_prompts + token_prefix/suffix (CLIP-like)
-        # -------------------------
         classnames = [c.replace("_", " ") for c in classnames]
         prompts = [f"{prompt_prefix} {name}.".strip() for name in classnames]
 
@@ -1594,26 +1158,24 @@ class ConchVLPromptLearner(nn.Module):
             truncation=True,
             max_length=max_len,
             return_tensors="pt",
-        )["input_ids"]  # (n_cls, 77)
+        )["input_ids"]
 
-        self.tokenized_prompts = tokenized  # (n_cls, 77)
+        self.tokenized_prompts = tokenized
 
         with torch.no_grad():
-            embedding = te(self.tokenized_prompts).type(dtype)  # (n_cls, 77, dim)
+            embedding = te(self.tokenized_prompts).type(dtype)
 
         self.register_buffer(
             "token_prefix", embedding[:, :1, :], persistent=False
-        )  # BOS
+        )
         self.register_buffer(
             "token_suffix", embedding[:, 1 + self.n_ctx :, :], persistent=False
         )
 
-        # si tu en as besoin ailleurs
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def construct_prompts(self, ctx_for_classes, prefix, suffix):
-        # ctx_for_classes: (n_cls, n_ctx, dim)
-        return torch.cat([prefix, ctx_for_classes, suffix], dim=1)  # (n_cls, L, dim)
+        return torch.cat([prefix, ctx_for_classes, suffix], dim=1)
 
     def forward(self):
         ctx = self.ctx
@@ -1625,7 +1187,6 @@ class ConchVLPromptLearner(nn.Module):
         if self.ctx_deep is None:
             return prompts, None
 
-        # (depth-1, n_ctx, dim) -> (depth-1, n_cls, n_ctx, dim)
         deep = self.ctx_deep.unsqueeze(1).expand(-1, self.n_cls, -1, -1)
         return prompts, deep
 
@@ -1648,9 +1209,6 @@ class HFVLPromptLearner(nn.Module):
         self.n_ctx = n_ctx
         self.depth_t = depth_t
 
-        # -------------------------
-        # 1) init ctx0 (layer 0)
-        # -------------------------
         if ctx_init and (n_ctx > 0):
             ctx_init = ctx_init.replace("_", " ")
             prompt_prefix = ctx_init
@@ -1662,35 +1220,28 @@ class HFVLPromptLearner(nn.Module):
                 padding=False,
                 truncation=True,
                 return_tensors="pt",
-            )["input_ids"]  # (1, L)
+            )["input_ids"]
 
             with torch.no_grad():
-                emb = self.token_embedding(tok)  # (1, L, hidden)
+                emb = self.token_embedding(tok)
 
-            ctx_vectors = emb[0, 1 : 1 + self.n_ctx, :].clone()  # après BOS
+            ctx_vectors = emb[0, 1 : 1 + self.n_ctx, :].clone()
         else:
             print("Initializing a generic context")
             ctx_vectors = torch.empty(self.n_ctx, self.hidden, dtype=dtype)
             prompt_prefix = " ".join(["X"] * self.n_ctx)
             nn.init.normal_(ctx_vectors, std=0.02)
 
-        # -------------------------
-        # 2) paramètres deep: ctx_layers
-        # -------------------------
         self.ctx = nn.Parameter(ctx_vectors)
-        # deep ctx (layers 1..depth_t-1), si depth_t > 1
         if self.depth_t > 1:
             deep_ctx = torch.empty(
                 self.depth_t - 1, self.n_ctx, self.hidden, dtype=dtype
             )
             nn.init.normal_(deep_ctx, std=0.02)
-            self.ctx_deep = nn.Parameter(deep_ctx)  # (depth_t-1, n_ctx, dim)
+            self.ctx_deep = nn.Parameter(deep_ctx)
         else:
             self.ctx_deep = None
 
-        # -------------------------
-        # 3) tokenized_prompts + prefix/suffix (EXACT CoOp)
-        # -------------------------
         classnames = [c.replace("_", " ") for c in classnames]
         prompts = [f"{prompt_prefix} {name}.".strip() for name in classnames]
 
@@ -1701,13 +1252,13 @@ class HFVLPromptLearner(nn.Module):
             max_length=max_len,
             return_tensors="pt",
         )
-        self.tokenized_prompts = tok_full["input_ids"]  # (n_cls, 77)
-        self.attention_mask = tok_full["attention_mask"]  # (n_cls, 77)
+        self.tokenized_prompts = tok_full["input_ids"]
+        self.attention_mask = tok_full["attention_mask"]
 
         with torch.no_grad():
             embedding = self.token_embedding(
                 self.tokenized_prompts
-            )  # (n_cls, 77, hidden)
+            )
 
         self.register_buffer("token_prefix", embedding[:, :1, :], persistent=False)
         self.register_buffer(
@@ -1717,8 +1268,7 @@ class HFVLPromptLearner(nn.Module):
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def construct_prompts(self, ctx_for_classes, prefix, suffix):
-        # ctx_for_classes: (n_cls, n_ctx, dim)
-        return torch.cat([prefix, ctx_for_classes, suffix], dim=1)  # (n_cls, L, dim)
+        return torch.cat([prefix, ctx_for_classes, suffix], dim=1)
 
     def forward(self):
         ctx = self.ctx
@@ -1730,7 +1280,6 @@ class HFVLPromptLearner(nn.Module):
         if self.ctx_deep is None:
             return prompts, None
 
-        # (depth-1, n_ctx, dim) -> (depth-1, n_cls, n_ctx, dim)
         deep = self.ctx_deep.unsqueeze(1).expand(-1, self.n_cls, -1, -1)
         return prompts, deep
 
@@ -1745,27 +1294,21 @@ class TimmVisionVPT(nn.Module):
         self.v_depth = int(v_depth)
         self.return_tokens = return_tokens
 
-        # --- infer embed_dim robustly (timm / open_clip / conch) ---
         embed_dim = getattr(timm_vit, "embed_dim", None)
 
-        # open_clip VisionTransformer often uses "width"
         if embed_dim is None:
             embed_dim = getattr(timm_vit, "width", None)
 
-        # many ViTs expose conv1 (openai/open_clip style)
         if embed_dim is None and hasattr(timm_vit, "conv1"):
             embed_dim = timm_vit.conv1.out_channels
 
-        # timm style patch_embed.proj
         if embed_dim is None and hasattr(timm_vit, "patch_embed"):
             pe = timm_vit.patch_embed
             if hasattr(pe, "proj") and hasattr(pe.proj, "out_channels"):
                 embed_dim = pe.proj.out_channels
             elif hasattr(pe, "proj") and hasattr(pe.proj, "weight"):
-                # Conv2d: (out_channels, in_channels, kH, kW)
                 embed_dim = pe.proj.weight.shape[0]
 
-        # open_clip / timm positional embedding
         if embed_dim is None:
             for name in ["pos_embed", "positional_embedding", "position_embedding"]:
                 if hasattr(timm_vit, name):
@@ -1774,11 +1317,9 @@ class TimmVisionVPT(nn.Module):
                         embed_dim = pe.shape[-1]
                         break
 
-        # last resort: scan first weight matrix
         if embed_dim is None:
             for _, p in timm_vit.named_parameters():
                 if p.ndim == 2 and p.shape[0] >= 64 and p.shape[1] >= 64:
-                    # often (out, in) = (3*D, D) or (D, D)
                     embed_dim = min(p.shape[0], p.shape[1])
                     break
 
@@ -1804,7 +1345,6 @@ class TimmVisionVPT(nn.Module):
                     self.VPT_layers.append(nn.Parameter(pi))
 
     def _append_vpt0(self, x):
-        # x: (B, L, D)
         vpt = (
             self.VPT0.to(dtype=x.dtype, device=x.device)
             .unsqueeze(0)
@@ -1813,29 +1353,21 @@ class TimmVisionVPT(nn.Module):
         return torch.cat([x, vpt], dim=1)
 
     def _replace_vpt_for_layer(self, x, layer_idx: int):
-        # remplace les prompts en FIN de séquence
-        # layer_idx: 1..v_depth-1
         x_prefix = x[:, : x.size(1) - self.n_ctx, :]
         vpt = self.VPT_layers[layer_idx - 1].to(dtype=x.dtype, device=x.device)
         vpt = vpt.unsqueeze(0).expand(x.size(0), -1, -1)
         return torch.cat([x_prefix, vpt], dim=1)
 
     def forward(self, x: torch.Tensor):
-        # 1) patch embed -> (B, N, D)
         x = self.vit.patch_embed(x)
 
-        # Conch/timm peut renvoyer:
-        # - (B, D, H, W)  => BCHW
-        # - (B, H, W, D)  => BHWD
         if x.dim() == 4:
             B = x.shape[0]
             D = self.embed_dim
 
             if x.shape[1] == D:
-                # (B, D, H, W) -> (B, N, D)
                 x = x.flatten(2).transpose(1, 2)
             elif x.shape[-1] == D:
-                # (B, H, W, D) -> (B, N, D)
                 x = x.reshape(B, -1, D)
             else:
                 raise RuntimeError(
@@ -1846,11 +1378,9 @@ class TimmVisionVPT(nn.Module):
                 f"[TimmVisionVPT] Unexpected patch_embed output dim={x.dim()} shape={tuple(x.shape)}"
             )
 
-        # 2) cls token
         cls = self.vit.cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls, x), dim=1)
 
-        # 3) pos embed sur CLS+PATCHES uniquement
         if getattr(self.vit, "pos_embed", None) is not None:
             pos = self.vit.pos_embed.to(dtype=x.dtype, device=x.device)
             x = x + pos
@@ -1858,25 +1388,18 @@ class TimmVisionVPT(nn.Module):
         if hasattr(self.vit, "pos_drop") and self.vit.pos_drop is not None:
             x = self.vit.pos_drop(x)
 
-        # 4) prompts
         if self.use:
-            # shallow = v_depth == 1  (juste VPT0)
-            # deep = v_depth >= 2 (VPT0 + replace à chaque couche)
             x = self._append_vpt0(x)
 
-        # 5) blocks timm
         if not self.use or self.v_depth == 1:
-            # pas de remplacement par couche
             for blk in self.vit.blocks:
                 x = blk(x)
         else:
-            # deep: remplacer pour layers 1..v_depth-1
             for i, blk in enumerate(self.vit.blocks):
                 if 1 <= i < self.v_depth:
                     x = self._replace_vpt_for_layer(x, layer_idx=i)
                 x = blk(x)
 
-        # 6) norm + return CLS
         x = self.vit.norm(x)
         if self.return_tokens:
             return x
@@ -1891,7 +1414,6 @@ class OpenClipVisionVPT(nn.Module):
         self.v_depth = int(v_depth)
         self.use = (self.n_ctx > 0) and (self.v_depth > 0)
 
-        # embed dim
         if hasattr(self.base, "width"):
             d = self.base.width
         elif hasattr(self.base, "embed_dim"):
@@ -1912,7 +1434,7 @@ class OpenClipVisionVPT(nn.Module):
                     nn.init.normal_(p, std=0.02)
                     self.VPT_layers.append(p)
 
-    def _append_vpt0_BLD(self, x):  # (B,L,D)
+    def _append_vpt0_BLD(self, x):
         vpt = (
             self.VPT0.to(dtype=x.dtype, device=x.device)
             .unsqueeze(0)
@@ -1920,16 +1442,15 @@ class OpenClipVisionVPT(nn.Module):
         )
         return torch.cat([x, vpt], dim=1)
 
-    def _replace_vpt_LBD(self, x, layer_idx: int):  # (L,B,D)
-        # remplace les n_ctx derniers tokens (en fin)
+    def _replace_vpt_LBD(self, x, layer_idx: int):
         prefix = x[: -self.n_ctx, :, :]
         vpt = self.VPT_layers[layer_idx - 1].to(
             dtype=x.dtype, device=x.device
-        )  # (n_ctx, D)
-        vpt = vpt.unsqueeze(1).expand(-1, x.shape[1], -1)  # (n_ctx, B, D)
+        )
+        vpt = vpt.unsqueeze(1).expand(-1, x.shape[1], -1)
         return torch.cat([prefix, vpt], dim=0)
 
-    def _replace_vpt_for_layer_BLD(self, x, layer_idx: int):  # x: (B, L, D)
+    def _replace_vpt_for_layer_BLD(self, x, layer_idx: int):
         prefix = x[:, : -self.n_ctx, :]
         vpt = (
             self.VPT_layers[layer_idx - 1]
@@ -1939,42 +1460,35 @@ class OpenClipVisionVPT(nn.Module):
         return torch.cat([prefix, vpt], dim=1)
 
     def forward(self, x):
-        # 1) patchify -> (B, N, D)
         x = x.to(
             dtype=self.base.conv1.weight.dtype, device=self.base.conv1.weight.device
         )
-        x = self.base.conv1(x)  # (B,D,gh,gw)
+        x = self.base.conv1(x)
         x = x.reshape(x.shape[0], x.shape[1], -1).permute(0, 2, 1)
 
-        # 2) CLS + pos (sur CLS+PATCHES)
         cls = self.base.class_embedding.to(dtype=x.dtype, device=x.device)
         cls = cls.unsqueeze(0).unsqueeze(1).expand(x.size(0), 1, -1)
-        x = torch.cat([cls, x], dim=1)  # (B, 1+N, D)
+        x = torch.cat([cls, x], dim=1)
 
         pos = self.base.positional_embedding.to(dtype=x.dtype, device=x.device)
         x = x + pos[: x.size(1), :].unsqueeze(0)
 
-        # 3) patch_dropout (si actif) AVANT prompts
         if hasattr(self.base, "patch_dropout") and self.base.patch_dropout is not None:
             x = self.base.patch_dropout(x)
 
-        # 4) prompts après pos (prompts sans pos)
         if self.use:
-            x = self._append_vpt0_BLD(x)  # (B, 1+N+nctx, D)
+            x = self._append_vpt0_BLD(x)
 
-        # 5) ln_pre
         if getattr(self.base, "ln_pre", None) is not None:
             x = self.base.ln_pre(x)
 
-        # 6) transformer (OpenAI-like) : doit être en (L,B,D)
         blocks = self.base.transformer.resblocks
         blk0 = blocks[0]
-        batch_first = getattr(blk0.attn, "batch_first", False)  # <- clé du bug
+        batch_first = getattr(blk0.attn, "batch_first", False)
 
         v_depth = min(self.v_depth, len(blocks)) if self.use else 0
 
         if batch_first:
-            # blocks attendent (B,L,D)
             if (not self.use) or (v_depth == 1):
                 for blk in blocks:
                     x = blk(x)
@@ -1984,8 +1498,7 @@ class OpenClipVisionVPT(nn.Module):
                         x = self._replace_vpt_for_layer_BLD(x, i)
                     x = blk(x)
         else:
-            # blocks attendent (L,B,D)
-            x = x.permute(1, 0, 2)  # (L,B,D)
+            x = x.permute(1, 0, 2)
             if (not self.use) or (v_depth == 1):
                 for blk in blocks:
                     x = blk(x)
@@ -1994,9 +1507,8 @@ class OpenClipVisionVPT(nn.Module):
                     if 1 <= i < v_depth:
                         x = self._replace_vpt_for_layer_LBD(x, i)
                     x = blk(x)
-            x = x.permute(1, 0, 2)  # (B,L,D)
+            x = x.permute(1, 0, 2)
 
-        # 7) pool CLS + ln_post + proj
         feat = x[:, 0, :]
         if getattr(self.base, "ln_post", None) is not None:
             feat = self.base.ln_post(feat)
@@ -2009,17 +1521,6 @@ class OpenClipVisionVPT(nn.Module):
 
 
 class OpenAIVisionVPT(nn.Module):
-    """
-    Wrapper pour CLIP openai-like visual VisionTransformer:
-      - v_depth == 0 : no prompts
-      - v_depth == 1 : shallow prompts (VPT0) ajoutés une fois
-      - v_depth >= 2 : deep prompts (VPT0 + VPT_layers[1..v_depth-1]) remplacés à chaque couche i=1..v_depth-1
-
-    Conformément à ta version OpenAI:
-      - pos_embed appliqué à CLS+PATCHES
-      - prompts concaténés APRES pos (donc prompts sans pos)
-      - prompts placés à la FIN
-    """
 
     def __init__(self, visual_vit: nn.Module, n_ctx: int, v_depth: int):
         super().__init__()
@@ -2027,17 +1528,16 @@ class OpenAIVisionVPT(nn.Module):
         self.n_ctx = int(n_ctx)
         self.v_depth = int(v_depth)
 
-        # proxy attrs utiles
         self.input_resolution = getattr(visual_vit, "input_resolution", None)
         self.output_dim = getattr(visual_vit, "output_dim", None)
 
-        width = getattr(visual_vit, "conv1").out_channels  # embed dim
+        width = getattr(visual_vit, "conv1").out_channels
         self.use = (self.n_ctx > 0) and (self.v_depth > 0)
 
         if self.use:
             p0 = torch.empty(self.n_ctx, width)
             nn.init.normal_(p0, std=0.02)
-            self.VPT0 = nn.Parameter(p0)  # <-- "VPT" => ton freeze le garde
+            self.VPT0 = nn.Parameter(p0)
 
             self.VPT_layers = nn.ParameterList()
             if self.v_depth >= 2:
@@ -2047,34 +1547,29 @@ class OpenAIVisionVPT(nn.Module):
                     self.VPT_layers.append(nn.Parameter(pi))
 
     def _append_vpt0_NLD(self, x):
-        # x: (B, L, D)
         vpt = (
             self.VPT0.to(dtype=x.dtype, device=x.device)
             .unsqueeze(0)
             .expand(x.size(0), -1, -1)
         )
-        return torch.cat([x, vpt], dim=1)  # prompts à la fin
+        return torch.cat([x, vpt], dim=1)
 
     def _replace_vpt_for_layer_LND(self, x, layer_idx: int):
-        # x: (L, B, D) avec prompts en fin => remplacer les derniers n_ctx tokens
         prefix = x[: x.shape[0] - self.n_ctx, :, :]
         vpt = self.VPT_layers[layer_idx - 1].to(
             dtype=x.dtype, device=x.device
-        )  # (n_ctx, D)
-        vpt = vpt.unsqueeze(1).expand(-1, x.shape[1], -1)  # (n_ctx, B, D)
+        )
+        vpt = vpt.unsqueeze(1).expand(-1, x.shape[1], -1)
         return torch.cat([prefix, vpt], dim=0)
 
     def forward(self, x: torch.Tensor):
-        # Reprend la logique VisionTransformer openai-like
-        # 1) patchify
         x = x.to(
             dtype=self.base.conv1.weight.dtype, device=self.base.conv1.weight.device
         )
-        x = self.base.conv1(x)  # (B, D, grid, grid)
-        x = x.reshape(x.shape[0], x.shape[1], -1)  # (B, D, grid^2)
-        x = x.permute(0, 2, 1)  # (B, grid^2, D)
+        x = self.base.conv1(x)
+        x = x.reshape(x.shape[0], x.shape[1], -1)
+        x = x.permute(0, 2, 1)
 
-        # 2) CLS token
         x = torch.cat(
             [
                 self.base.class_embedding.to(dtype=x.dtype, device=x.device)
@@ -2084,36 +1579,28 @@ class OpenAIVisionVPT(nn.Module):
                 x,
             ],
             dim=1,
-        )  # (B, 1+grid^2, D)
+        )
 
-        # 3) pos embed (sur CLS+PATCHES)
         x = x + self.base.positional_embedding.to(dtype=x.dtype, device=x.device)
 
-        # 4) prompts après pos (comme ta version normale)
         if self.use:
             x = self._append_vpt0_NLD(x)
 
-        # 5) pre-norm
         x = self.base.ln_pre(x)
 
-        # 6) transformer en LND
-        x = x.permute(1, 0, 2)  # (L, B, D)
+        x = x.permute(1, 0, 2)
 
-        # shallow: on ne remplace jamais
         if (not self.use) or (self.v_depth == 1):
             for blk in self.base.transformer.resblocks:
                 x = blk(x)
         else:
-            # deep: remplacer prompts pour layers 1..v_depth-1 avant d'appliquer blk i
             for i, blk in enumerate(self.base.transformer.resblocks):
                 if 1 <= i < self.v_depth:
                     x = self._replace_vpt_for_layer_LND(x, layer_idx=i)
                 x = blk(x)
 
-        # 7) back to NLD
-        x = x.permute(1, 0, 2)  # (B, L, D)
+        x = x.permute(1, 0, 2)
 
-        # 8) prendre CLS (index 0)
         x = self.base.ln_post(x[:, 0, :])
 
         if getattr(self.base, "proj", None) is not None:
@@ -2123,13 +1610,6 @@ class OpenAIVisionVPT(nn.Module):
 
 
 class HFCLIPVisionVPT(nn.Module):
-    """
-    HF CLIPVisionTransformer wrapper:
-    - v_depth == 0: no prompts
-    - v_depth == 1: shallow (VPT0 appended once)
-    - v_depth >=2: deep (replace last n_ctx_v tokens before layer i=1..v_depth-1)
-    Prompts added AFTER position embeddings (prompts have no pos).
-    """
 
     def __init__(self, vision_model: nn.Module, n_ctx: int, v_depth: int):
         super().__init__()
@@ -2138,11 +1618,11 @@ class HFCLIPVisionVPT(nn.Module):
         self.v_depth = int(v_depth)
         self.use = (self.n_ctx > 0) and (self.v_depth > 0)
 
-        hidden = self.base.embeddings.patch_embedding.out_channels  # 768
+        hidden = self.base.embeddings.patch_embedding.out_channels
         if self.use:
             p0 = torch.empty(self.n_ctx, hidden)
             nn.init.normal_(p0, std=0.02)
-            self.VPT0 = nn.Parameter(p0)  # keep "VPT" in name
+            self.VPT0 = nn.Parameter(p0)
 
             self.VPT_layers = nn.ParameterList()
             if self.v_depth >= 2:
@@ -2151,7 +1631,7 @@ class HFCLIPVisionVPT(nn.Module):
                     nn.init.normal_(pi, std=0.02)
                     self.VPT_layers.append(nn.Parameter(pi))
 
-    def _append_vpt(self, x):  # x: (B, L, D)
+    def _append_vpt(self, x):
         vpt = (
             self.VPT0.to(dtype=x.dtype, device=x.device)
             .unsqueeze(0)
@@ -2159,29 +1639,24 @@ class HFCLIPVisionVPT(nn.Module):
         )
         return torch.cat([x, vpt], dim=1)
 
-    def _replace_vpt(self, x, layer_idx: int):  # x: (B, L, D)
+    def _replace_vpt(self, x, layer_idx: int):
         prefix = x[:, : x.size(1) - self.n_ctx, :]
         vpt = self.VPT_layers[layer_idx - 1].to(dtype=x.dtype, device=x.device)
         vpt = vpt.unsqueeze(0).expand(x.size(0), -1, -1)
         return torch.cat([prefix, vpt], dim=1)
 
     def forward(self, pixel_values: torch.Tensor):
-        # embeddings: patch + cls + pos
-        x = self.base.embeddings(pixel_values)  # (B, 1+N, D)
+        x = self.base.embeddings(pixel_values)
 
-        # add prompts after pos
         if self.use:
             x = self._append_vpt(x)
 
         x = self.base.pre_layrnorm(x)
 
-        # encoder layers (HF CLIPEncoderLayer peut exiger attention_mask & causal_attention_mask)
         for i, layer in enumerate(self.base.encoder.layers):
-            # deep replace prompts for layers 1..v_depth-1
             if self.use and (self.v_depth >= 2) and (1 <= i < self.v_depth):
                 x = self._replace_vpt(x, layer_idx=i)
 
-            # passe les kwargs uniquement si nécessaires (compat multi-versions)
             sig = inspect.signature(layer.forward)
             kwargs = {}
             if "attention_mask" in sig.parameters:
@@ -2193,19 +1668,10 @@ class HFCLIPVisionVPT(nn.Module):
             x = out[0] if isinstance(out, (tuple, list)) else out
 
         x = self.base.post_layernorm(x)
-        return x[:, 0, :]  # CLS
+        return x[:, 0, :]
 
 
 class DinoVisionVPT(nn.Module):
-    """
-    VPT sur DinoVisionTransformer.
-    - v_depth == 0 : pas de prompts
-    - v_depth == 1 : shallow (VPT0 ajouté une fois)
-    - v_depth >= 2 : deep (VPT0 + remplacement des prompts avant blocks i=1..v_depth-1)
-
-    Hypothèse: après patch_embed, on obtient une séquence (B, N, D).
-    Si Dino renvoie un nested tensor, on tente de le "déballer".
-    """
 
     def __init__(self, dino_vit: nn.Module, n_ctx: int, v_depth: int):
         super().__init__()
@@ -2214,16 +1680,14 @@ class DinoVisionVPT(nn.Module):
         self.v_depth = int(v_depth)
         self.use = (self.n_ctx > 0) and (self.v_depth > 0)
 
-        # embed dim
         embed_dim = getattr(self.vit, "embed_dim", None)
         if embed_dim is None:
-            # ton print montre patch_embed.proj out_channels = 768
             embed_dim = self.vit.patch_embed.proj.out_channels
 
         if self.use:
             p0 = torch.empty(self.n_ctx, embed_dim)
             nn.init.normal_(p0, std=0.02)
-            self.VPT0 = nn.Parameter(p0)  # "VPT" dans le nom pour ton freeze
+            self.VPT0 = nn.Parameter(p0)
 
             self.VPT_layers = nn.ParameterList()
             if self.v_depth >= 2:
@@ -2232,15 +1696,12 @@ class DinoVisionVPT(nn.Module):
                     nn.init.normal_(pi, std=0.02)
                     self.VPT_layers.append(nn.Parameter(pi))
 
-        # proxy: certains frameworks attendent que le backbone expose num_features
         self.num_features = embed_dim
 
     def _unpack_tokens(self, x):
-        # cas 1: déjà tensor (B,N,D)
         if torch.is_tensor(x):
             return x, None
 
-        # cas 2: NestedTensor-like (suivant impl)
         if hasattr(x, "x") and torch.is_tensor(x.x):
             return x.x, ("x", x)
         if hasattr(x, "tensors") and torch.is_tensor(x.tensors):
@@ -2260,12 +1721,12 @@ class DinoVisionVPT(nn.Module):
             return obj
         return tokens
 
-    def _append_vpt(self, tokens):  # (B,N,D) -> (B,N+n_ctx,D)
+    def _append_vpt(self, tokens):
         vpt = self.VPT0.to(dtype=tokens.dtype, device=tokens.device).unsqueeze(0)
         vpt = vpt.expand(tokens.size(0), -1, -1)
         return torch.cat([tokens, vpt], dim=1)
 
-    def _replace_vpt(self, tokens, layer_idx: int):  # remplace les derniers n_ctx
+    def _replace_vpt(self, tokens, layer_idx: int):
         prefix = tokens[:, : tokens.size(1) - self.n_ctx, :]
         vpt = self.VPT_layers[layer_idx - 1].to(
             dtype=tokens.dtype, device=tokens.device
@@ -2274,17 +1735,14 @@ class DinoVisionVPT(nn.Module):
         return torch.cat([prefix, vpt], dim=1)
 
     def forward(self, x: torch.Tensor):
-        # 1) patch embed
-        out = self.vit.patch_embed(x)  # souvent (B,N,D) ou nested
+        out = self.vit.patch_embed(x)
         tokens, packinfo = self._unpack_tokens(out)
 
-        # 2) prompts
         if self.use:
             tokens = self._append_vpt(tokens)
 
         out = self._repack_tokens(tokens, packinfo)
 
-        # 3) blocks
         if (not self.use) or (self.v_depth == 1):
             for blk in self.vit.blocks:
                 out = blk(out)
@@ -2296,16 +1754,10 @@ class DinoVisionVPT(nn.Module):
                     out = self._repack_tokens(t, p)
                 out = blk(out)
 
-        # 4) norm
-        # on normalise sur tokens (et on renvoie CLS-like = premier token si existant,
-        # sinon un pool mean)
         t, _ = self._unpack_tokens(out)
         t = self.vit.norm(t)
 
-        # si Dino n'a pas CLS, c'est souvent mean pool
         if t.size(1) >= 1:
-            # choix: soit token[0], soit mean pool; à toi de décider.
-            # Je mets mean pool (plus standard Dino) :
             return t.mean(dim=1)
         return t
 
@@ -2329,7 +1781,6 @@ class VisionOnlyFromVLM(nn.Module):
         self.normalize_feats = bool(normalize_feats)
         self.force_fp32_head = bool(force_fp32_head)
 
-        # infer feature dim once, safely, in init
         if feat_dim is None:
             feat_dim = self._infer_feat_dim_cpu()
         self.feat_dim = int(feat_dim)
@@ -2338,10 +1789,6 @@ class VisionOnlyFromVLM(nn.Module):
 
     @torch.no_grad()
     def _infer_feat_dim_cpu(self) -> int:
-        """
-        Infer feature dim by a tiny forward on CPU in fp32.
-        Then restore original device/dtype.
-        """
         params = list(self.backbone.parameters())
         if len(params) > 0:
             orig_device = params[0].device
@@ -2350,7 +1797,6 @@ class VisionOnlyFromVLM(nn.Module):
             orig_device = torch.device("cpu")
             orig_dtype = torch.float32
 
-        # IMPORTANT: CPU inference in float32
         self.backbone.to(device="cpu", dtype=torch.float32)
         self.backbone.eval()
 
@@ -2366,15 +1812,10 @@ class VisionOnlyFromVLM(nn.Module):
         f = self.encode_image_features(x)
         dim = int(f.shape[-1])
 
-        # restore
         self.backbone.to(device=orig_device, dtype=orig_dtype)
         return dim
 
     def encode_image_features(self, image: torch.Tensor) -> torch.Tensor:
-        """
-        Returns projected image features (B, D).
-        """
-        # HF CLIPModel
         if self.backend == "hf_clip":
             clipm = self.backbone
             dtype = (
@@ -2393,7 +1834,6 @@ class VisionOnlyFromVLM(nn.Module):
                 feats = clipm.get_image_features(pixel_values=image.to(dtype=dtype))
             return feats
 
-        # generic CLIP/open_clip/conch/biomed
         if hasattr(self.backbone, "encode_image"):
             p = next(self.backbone.parameters(), None)
             dtype = p.dtype if p is not None else image.dtype
@@ -2481,18 +1921,15 @@ class CustomBiomedCLIP(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
-        self.clip_model = biomed_model  # keep same naming style
+        self.clip_model = biomed_model
         self.logit_scale = getattr(biomed_model, "logit_scale", None)
 
         self.t_depth = int(cfg.TRAINER.IVLP.PROMPT_DEPTH_TEXT)
         self.n_ctx_t = int(cfg.TRAINER.IVLP.N_CTX_TEXT)
 
-        # dtype "vérité" (biomed/open_clip souvent fp16)
         self.dtype = next(biomed_model.parameters()).dtype
 
-        # --- text parts ---
         if self.t_depth > 0 and self.n_ctx_t > 0:
-            # prompt learner ctx appris
             token_emb = _get_openclip_token_embedding(biomed_model)
             hidden = token_emb.weight.shape[1]
             self.prompt_learner = BiomedVLPromptLearner(
@@ -2511,7 +1948,6 @@ class CustomBiomedCLIP(nn.Module):
             self.prompt_learner = None
             self.tokenized_prompts = None
             self.text_encoder = None
-            # texte fixe par classe (pré-calc)
             self.fixed_text = FixedEmbeddingsBiomed(
                 cfg, classnames, biomed_model, tokenizer
             )
@@ -2526,9 +1962,7 @@ class CustomBiomedCLIP(nn.Module):
         raise AttributeError("BiomedCLIP model has no encode_image/visual")
 
     def forward(self, image, label=None):
-        # logit_scale
         if self.logit_scale is None:
-            # fallback
             logit_scale = torch.tensor(1.0, device=image.device)
         else:
             logit_scale = (
@@ -2537,11 +1971,9 @@ class CustomBiomedCLIP(nn.Module):
                 else torch.exp(self.logit_scale)
             )
 
-        # image feats
         img_feats = self.encode_image(image)
         img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True).clamp_min(1e-6)
 
-        # text feats
         if self.prompt_learner is None:
             txt_feats = self.fixed_text()
         else:
@@ -2551,7 +1983,7 @@ class CustomBiomedCLIP(nn.Module):
                 prompts_emb,
                 tok,
                 deep_prompts=deep_prompts,
-                n_ctx=self.n_ctx_t,  # ou self.prompt_learner.n_ctx
+                n_ctx=self.n_ctx_t,
             )
             txt_feats = txt_feats / txt_feats.norm(dim=-1, keepdim=True).clamp_min(1e-6)
 
@@ -2582,7 +2014,7 @@ class CustomQuiltCLIP(nn.Module):
             pad_id = getattr(tokenizer, "pad_id", 0)
             self.text_encoder = TextEncoderConch(
                 quilt_model, pad_id=pad_id
-            )  # OK aussi pour open_clip
+            )
             self.fixed_text = None
         else:
             self.prompt_learner = None
@@ -2733,7 +2165,6 @@ class CustomPubMedCLIP(nn.Module):
         t_depth = int(cfg.TRAINER.IVLP.PROMPT_DEPTH_TEXT)
         n_ctx_t = int(cfg.TRAINER.IVLP.N_CTX_TEXT)
 
-        # text encoder (HF) utilisant inputs_embeds
         if (t_depth > 0) and (n_ctx_t > 0):
             self.prompt_learner = HFVLPromptLearner(
                 cfg, classnames, clip_model, tokenizer
@@ -2750,7 +2181,6 @@ class CustomPubMedCLIP(nn.Module):
     def _encode_image(self, image: torch.Tensor) -> torch.Tensor:
         dtype = next(self.clip.parameters()).dtype
 
-        # si tu as wrappé clip.vision_model par HFCLIPVisionVPT
         if (
             hasattr(self.clip, "vision_model")
             and self.clip.vision_model.__class__.__name__ == "HFCLIPVisionVPT"
@@ -2764,13 +2194,11 @@ class CustomPubMedCLIP(nn.Module):
     def forward(self, image, label=None):
         device = image.device
 
-        # image feats
         image_features = self._encode_image(image)
         image_features = image_features / image_features.norm(
             dim=-1, keepdim=True
         ).clamp_min(1e-6)
 
-        # text feats
         n_ctx = int(self.cfg.TRAINER.IVLP.N_CTX_TEXT)
 
         if self.prompt_learner is None:
@@ -2780,7 +2208,7 @@ class CustomPubMedCLIP(nn.Module):
         else:
             prompts_emb, deep = (
                 self.prompt_learner()
-            )  # prompts_emb: (n_cls,L,H), deep: (depth-1,n_cls,n_ctx,H) or None
+            )
             input_ids = self.prompt_learner.tokenized_prompts.to(device)
             attn = self.prompt_learner.attention_mask.to(device)
 
@@ -2796,7 +2224,6 @@ class CustomPubMedCLIP(nn.Module):
                 dim=-1, keepdim=True
             ).clamp_min(1e-6)
 
-        # logit scale
         if self.logit_scale is None:
             logit_scale = torch.tensor(
                 1 / 0.07, device=device, dtype=image_features.dtype
@@ -2814,11 +2241,6 @@ class CustomPubMedCLIP(nn.Module):
 
 
 class CustomDinoBloom(nn.Module):
-    """
-    DinoBloom vision-only:
-    - backbone = DinoBloom (optionnellement wrappé avec DinoVisionVPT)
-    - head = Linear(D -> n_cls)
-    """
 
     def __init__(self, cfg, classnames, dino_model: nn.Module):
         super().__init__()
@@ -2826,20 +2248,18 @@ class CustomDinoBloom(nn.Module):
         self.backbone = dino_model
         self.num_classes = len(classnames)
 
-        # infer feat dim
         feat_dim = getattr(self.backbone, "num_features", None)
         if feat_dim is None:
             feat_dim = getattr(self.backbone, "embed_dim", None)
         if feat_dim is None:
-            # fallback: typiquement vitb14 -> 768
             feat_dim = 768
 
         self.head = nn.Linear(feat_dim, self.num_classes)
 
     def forward(self, image, label=None):
         dtype = next(self.backbone.parameters()).dtype
-        feats = self.backbone(image.to(dtype=dtype))  # (B, D)
-        logits = self.head(feats.float())  # head en fp32 ok
+        feats = self.backbone(image.to(dtype=dtype))
+        logits = self.head(feats.float())
 
         if self.training and (label is not None):
             return F.cross_entropy(logits, label)
@@ -2848,7 +2268,6 @@ class CustomDinoBloom(nn.Module):
 
 
 def unwrap_visual(v):
-    # déplie tant que c'est ton wrapper
     while isinstance(v, OpenClipVisionVPT):
         v = v.base
     return v
@@ -2870,7 +2289,6 @@ class IVLP(TrainerX):
         clip_model, tokenizer, preprocess = load_clip_to_cpu(cfg, mode)
 
         if cfg.TRAINER.IVLP.PREC == "fp32" or cfg.TRAINER.IVLP.PREC == "amp":
-            # CLIP's default precision is fp16
             clip_model.float()
 
         print("Building custom CLIP")
@@ -2922,11 +2340,9 @@ class IVLP(TrainerX):
             if "VPT" in n:
                 print(n, p.requires_grad)
 
-        # 1) freeze all
         for _, p in self.model.named_parameters():
             p.requires_grad_(False)
 
-        # 2) unfreeze prompt_learner + all VPT (text+vision) + head if vision-only
         name_to_update = "prompt_learner"
         for name, p in self.model.named_parameters():
             if name_to_update in name:
@@ -2936,7 +2352,6 @@ class IVLP(TrainerX):
             elif ("head" in name) and (mode == "vision-only"):
                 p.requires_grad_(True)
 
-        # Double check
         enabled = set()
         for name, param in self.model.named_parameters():
             if param.requires_grad:
@@ -2951,13 +2366,6 @@ class IVLP(TrainerX):
         # Count of parameters
         m = self.model.module if hasattr(self.model, "module") else self.model
         print_param_report(m, prefix="[PARAMS]")
-
-        # Debug - sanity check
-        # sanity_check_any_backbone(
-        #     trainer=self,
-        #     image_size=cfg.INPUT.SIZE[0],
-        #     n_classes=len(self.dm.dataset.classnames),
-        # )
 
         # NOTE: only give prompt_learner to the optimizer
         self.optim = build_optimizer(self.model, cfg.OPTIM)
@@ -2999,7 +2407,7 @@ class IVLP(TrainerX):
             loss = model(image, label)
             optim.zero_grad()
             loss.backward()
-            optim.step()  # <-- UN SEUL step
+            optim.step()
 
         loss_summary = {"loss": loss.item()}
 

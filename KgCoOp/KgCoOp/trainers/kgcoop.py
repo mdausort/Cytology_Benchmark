@@ -43,7 +43,6 @@ def count_params(model: nn.Module):
 
 
 def count_params_by_module(model: nn.Module, key="prompt_learner"):
-    # utile pour vérifier que seul prompt_learner est entraîné
     sub = dict(model.named_modules()).get(key, None)
     if sub is None:
         return None
@@ -67,7 +66,6 @@ def vis_dim_from_encode_image_strict(model, image_size=224):
     if isinstance(y, (tuple, list)):
         y = y[0]
     if isinstance(y, dict):
-        # au cas où
         y = y.get("image_features", next(iter(y.values())))
     if y.dim() != 2:
         y = y.reshape(y.size(0), -1)
@@ -82,139 +80,21 @@ def vis_dim_from_encode_image_strict(model, image_size=224):
 def _tokenize_to_ids(tokenizer, texts, device):
     tok = tokenizer(texts)
 
-    # open_clip tokenizers: parfois dict, parfois Tensor, parfois list[list[int]]
     if isinstance(tok, dict):
         tok = tok.get("input_ids", next(iter(tok.values())))
 
-    if hasattr(tok, "input_ids"):  # tokenizers.Encoding / BatchEncoding-like
+    if hasattr(tok, "input_ids"):
         tok = tok.input_ids
 
-    # si c'est déjà un tensor -> parfait
     if torch.is_tensor(tok):
         ids = tok.long()
     else:
-        # list[list[int]] possiblement ragged -> pad à longueur max
-        # (ou impose 77 si tu veux coller CLIP)
         max_len = max(len(x) for x in tok)
         ids = torch.zeros(len(tok), max_len, dtype=torch.long)
         for i, row in enumerate(tok):
             ids[i, : len(row)] = torch.tensor(row, dtype=torch.long)
 
     return ids.to(device)
-
-
-def sanity_check_kgcoop_safe(
-    trainer, batch, w_score: float = 0.1, check_score_grad: bool = True
-):
-    import torch
-    import torch.nn.functional as F
-
-    print("\n" + "=" * 100)
-    print("🔍 SANITY CHECK KgCoOp (SAFE, non-destructive)")
-    print("=" * 100)
-
-    model = trainer.model
-    m = model.module if hasattr(model, "module") else model
-    img, label = trainer.parse_batch_train(batch)
-
-    # -------------------------------------------------
-    # [1] Trainable params: ONLY ctx
-    # -------------------------------------------------
-    trainable = [(n, p) for n, p in m.named_parameters() if p.requires_grad]
-    names = [n for n, _ in trainable]
-    print("[1] trainable:", names)
-    assert len(trainable) > 0, "❌ no trainable params"
-    assert all(("ctx" in n) for n in names), "❌ non-ctx param is trainable"
-
-    # find ctx
-    ctx_param, ctx_name = None, None
-    for n, p in m.named_parameters():
-        if n.endswith("prompt_learner.ctx") or n.endswith(".ctx") or n == "ctx":
-            ctx_param, ctx_name = p, n
-            break
-    assert ctx_param is not None, "❌ cannot find ctx param"
-
-    print(
-        "[1] ctx param:",
-        ctx_name,
-        "shape:",
-        tuple(ctx_param.shape),
-        "dtype:",
-        ctx_param.dtype,
-        "device:",
-        ctx_param.device,
-    )
-
-    # -------------------------------------------------
-    # [2] Forward + backward once (CE + small score)
-    # -------------------------------------------------
-    m.train()
-
-    # clear grads
-    for p in m.parameters():
-        if p.grad is not None:
-            p.grad = None
-
-    out, score = m(img)
-    loss_ce = F.cross_entropy(out, label)
-    total = loss_ce + (w_score * score if torch.is_tensor(score) else 0.0)
-
-    total.backward()
-
-    g = ctx_param.grad
-    assert g is not None, "❌ ctx.grad is None"
-    assert torch.isfinite(g).all(), "❌ ctx.grad has NaN/Inf"
-    print("[2] logits:", tuple(out.shape), out.dtype, out.device)
-    if torch.is_tensor(score):
-        print("[2] score :", float(score.detach().item()))
-    print(
-        "[2] ctx.grad mean/max:",
-        float(g.abs().mean().item()),
-        float(g.abs().max().item()),
-    )
-    if float(g.abs().max().item()) == 0.0:
-        print(
-            "⚠ ctx.grad is all-zero after total.backward() (possible at init / degenerate batch)."
-        )
-
-    # -------------------------------------------------
-    # [3] Optional: score -> ctx connectivity (NEW forward, no second backward on same graph)
-    # -------------------------------------------------
-    if check_score_grad:
-        # IMPORTANT: new forward to create a fresh graph
-        for p in m.parameters():
-            if p.grad is not None:
-                p.grad = None
-
-        out2, score2 = m(img)
-
-        if not torch.is_tensor(score2):
-            raise AssertionError("❌ score is not a tensor")
-
-        g_score = torch.autograd.grad(
-            outputs=score2,
-            inputs=ctx_param,
-            retain_graph=False,
-            create_graph=False,
-            allow_unused=True,
-        )[0]
-
-        if g_score is None:
-            raise AssertionError("❌ score is not connected to ctx (grad is None)")
-
-        assert torch.isfinite(g_score).all(), "❌ grad(score->ctx) has NaN/Inf"
-        print(
-            "[3] grad(score->ctx) mean/max:",
-            float(g_score.abs().mean().item()),
-            float(g_score.abs().max().item()),
-        )
-        if float(g_score.abs().max().item()) == 0.0:
-            print(
-                "⚠ grad(score->ctx) is all-zero (often OK at init; connectivity is what matters)."
-            )
-
-    print("\n✅ SAFE KgCoOp sanity check done")
-    print("=" * 100 + "\n")
 
 
 def _get_openclip_token_embedding(model):
@@ -311,10 +191,10 @@ class TextEncoder(nn.Module):
         pos = self.positional_embedding.to(dtype=tr_dtype)
 
         x = prompts + pos
-        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = x.permute(1, 0, 2)
         x = x.to(dtype=tr_dtype)
         x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = x.permute(1, 0, 2)
         x = self.ln_final(x).type(self.dtype)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
@@ -343,7 +223,6 @@ class PromptLearner(nn.Module):
         ), f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
 
         if ctx_init:
-            # use given words to initialize context vectors
             temp = "a photo of a"
             ctx_init = temp.replace("_", " ")
             n_ctx = len(ctx_init.split(" "))
@@ -354,7 +233,6 @@ class PromptLearner(nn.Module):
             prompt_prefix = ctx_init
 
         else:
-            # random initialization
             if cfg.TRAINER.COOP.CSC:
                 print("Initializing class-specific contexts")
                 ctx_vectors = torch.empty(n_cls, n_ctx, ctx_dim, dtype=dtype)
@@ -367,7 +245,7 @@ class PromptLearner(nn.Module):
         print(f'Initial context: "{prompt_prefix}"')
         print(f"Number of context words (tokens): {n_ctx}")
 
-        self.ctx = nn.Parameter(ctx_vectors)  # to be optimized
+        self.ctx = nn.Parameter(ctx_vectors)
 
         bias_vectors = torch.empty(1, 512, dtype=dtype)
         nn.init.normal_(bias_vectors, std=0.02)
@@ -409,12 +287,12 @@ class PromptLearner(nn.Module):
         with torch.no_grad():
             embedding = clip_model.token_embedding(tokenized_prompts).type(dtype)
 
-        self.register_buffer("token_prefix", embedding[:, :1, :])  # SOS
-        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])  # CLS, EOS
+        self.register_buffer("token_prefix", embedding[:, :1, :])
+        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])
 
         self.n_cls = n_cls
         self.n_ctx = n_ctx
-        self.tokenized_prompts = tokenized_prompts  # torch.Tensor
+        self.tokenized_prompts = tokenized_prompts
         self.name_lens = name_lens
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
@@ -447,15 +325,13 @@ class BiomedPromptLearner(nn.Module):
         device = next(biomed_model.parameters()).device
 
         n_cls = len(classnames)
-        n_ctx = cfg.TRAINER.COOP.N_CTX  # ou COOP.N_CTX si tu veux
+        n_ctx = cfg.TRAINER.COOP.N_CTX
         ctx_init = cfg.TRAINER.COOP.CTX_INIT
 
         proj = biomed_model.text.proj
         D = None
         if hasattr(proj, "out_features"):
             D = int(proj.out_features)
-
-        # cas 2: proj est un Sequential -> prendre le dernier Linear trouvé
         elif isinstance(proj, nn.Sequential):
             last_linear = None
             for mod in reversed(list(proj.modules())):
@@ -466,9 +342,7 @@ class BiomedPromptLearner(nn.Module):
                 raise AttributeError("biomed_model.text.proj is Sequential but contains no nn.Linear")
             D = int(last_linear.out_features)
 
-        # cas 3: proj est un Parameter / Tensor / autre -> fallback shape
         elif hasattr(proj, "weight"):
-            # ex: nn.Linear-like ou module custom
             D = int(proj.weight.shape[0])
 
         else:
@@ -479,19 +353,16 @@ class BiomedPromptLearner(nn.Module):
 
         vis_dim = None
 
-        # 1) heuristiques rapides (si dispo)
         vision = getattr(biomed_model, "visual", None)
         if vis_dim is None and vision is not None:
             if hasattr(vision, "output_dim"):
                 vis_dim = int(vision.output_dim)
             elif hasattr(vision, "proj") and hasattr(vision.proj, "weight"):
-                # cas fréquent: proj: Linear(in_features=?, out_features=embed_dim)
                 vis_dim = int(vision.proj.weight.shape[0])
 
         if vis_dim is None and hasattr(biomed_model, "embed_dim"):
             vis_dim = int(biomed_model.embed_dim)
 
-        # 2) fallback ultime: forward CPU sur encode_image
         if vis_dim is None:
             vis_dim = vis_dim_from_encode_image_strict(
                 biomed_model, image_size=cfg.INPUT.SIZE[0]
@@ -499,24 +370,21 @@ class BiomedPromptLearner(nn.Module):
 
         assert vis_dim is not None, "Could not infer vis_dim for Biomed meta_net"
 
-        # -------------------------
-        # 1) Init ctx (CTX_INIT ou random)
-        # -------------------------
         if ctx_init:
             temp = "a photo of a"
             ctx_init = temp.replace("_", " ")
             n_ctx = len(ctx_init.split(" "))
 
-            tok = tokenizer([ctx_init])  # open_clip tokenizer -> Tensor (1, L)
+            tok = tokenizer([ctx_init])
             if isinstance(tok, dict):
                 tok = tok["input_ids"]
             tok = tok.to(device)
             ids = tok[0]
-            content = ids[1:]  # skip CLS
-            ids_ctx = content[:n_ctx]  # (n_ctx,)
+            content = ids[1:]
+            ids_ctx = content[:n_ctx]
 
             with torch.no_grad():
-                ctx_vectors = word_embeddings(ids_ctx).to(dtype)  # (n_ctx, H)
+                ctx_vectors = word_embeddings(ids_ctx).to(dtype)
             prompt_prefix = ctx_init
 
         else:
@@ -555,22 +423,22 @@ class BiomedPromptLearner(nn.Module):
         if cfg.TRAINER.COCOOP.PREC == "fp16":
             self.meta_net.half()
 
-        tokenized_prompts = tokenizer(prompts)  # open_clip tokenizer
+        tokenized_prompts = tokenizer(prompts)
         if isinstance(tokenized_prompts, dict):
             tokenized_prompts = tokenized_prompts["input_ids"]
-        tokenized_prompts = tokenized_prompts.to(device)  # (n_cls, L)
+        tokenized_prompts = tokenized_prompts.to(device)
 
         self.tokenized_prompts = tokenized_prompts
 
         with torch.no_grad():
             embedding = word_embeddings(tokenized_prompts).type(dtype)
 
-        self.register_buffer("token_prefix", embedding[:, :1, :])  # SOS
-        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])  # CLS, EOS
+        self.register_buffer("token_prefix", embedding[:, :1, :])
+        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])
 
         self.n_ctx = n_ctx
         self.n_cls = n_cls
-        self.tokenized_prompts = tokenized_prompts  # torch.Tensor
+        self.tokenized_prompts = tokenized_prompts
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def forward(self, batch_size, device, dtype):
@@ -608,7 +476,7 @@ class QuiltPromptLearner(nn.Module):
         dtype = next(quilt_model.parameters()).dtype
 
         token_embedding = _get_openclip_token_embedding(quilt_model)
-        ctx_dim = token_embedding.weight.shape[1]  # robuste pour Quilt/open_clip
+        ctx_dim = token_embedding.weight.shape[1]
 
         vis_dim = None
         if hasattr(quilt_model, "visual") and hasattr(quilt_model.visual, "output_dim"):
@@ -623,9 +491,6 @@ class QuiltPromptLearner(nn.Module):
             vis_dim = quilt_model.config.embed_dim
         assert vis_dim is not None, "Could not infer vis_dim for Conch meta_net"
 
-        # -------------------------
-        # 1) Init ctx (CTX_INIT ou random)
-        # -------------------------
         if ctx_init:
             temp = "a photo of a"
             ctx_init = temp.replace("_", " ")
@@ -639,7 +504,7 @@ class QuiltPromptLearner(nn.Module):
                 tok = torch.as_tensor(tok)
 
             with torch.no_grad():
-                emb = token_embedding(tok).type(dtype)  # (1, L, dim)
+                emb = token_embedding(tok).type(dtype)
 
             ctx_vectors = emb[0, 1 : 1 + n_ctx, :].clone()
 
@@ -666,9 +531,6 @@ class QuiltPromptLearner(nn.Module):
         print(f'Initial context: "{prompt_prefix}"')
         print(f"Number of context words (tokens): {self.n_ctx}")
 
-        # -------------------------
-        # 2) Construire prompts par classe
-        # -------------------------
         classnames = [c.replace("_", " ") for c in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]
 
@@ -707,7 +569,7 @@ class QuiltPromptLearner(nn.Module):
         else:
             tokenized = torch.as_tensor(tokenized)
 
-        self.tokenized_prompts = tokenized  # (n_cls, L)
+        self.tokenized_prompts = tokenized
         with torch.no_grad():
             embedding = token_embedding(self.tokenized_prompts).type(dtype)
 
@@ -748,13 +610,11 @@ class ConchPromptLearner(nn.Module):
         n_ctx = cfg.TRAINER.COOP.N_CTX
         self.csc = cfg.TRAINER.COOP.CSC
 
-        # dim texte Conch = 768 (d'après ton print)
         ctx_dim = conch_model.text.ln_final.weight.shape[
             0
-        ]  # pt ctx_dim = conch_model.text.token_embedding.weight.shape[1]
+        ]
         dtype = next(conch_model.parameters()).dtype
 
-        # vis_dim pour meta_net
         vis_dim = None
         if hasattr(conch_model, "visual") and hasattr(conch_model.visual, "output_dim"):
             vis_dim = conch_model.visual.output_dim
@@ -768,9 +628,6 @@ class ConchPromptLearner(nn.Module):
             vis_dim = conch_model.config.embed_dim
         assert vis_dim is not None, "Could not infer vis_dim for Conch meta_net"
 
-        # -------------------------
-        # 1) init ctx
-        # -------------------------
         if ctx_init:
             temp = "a photo of a"
             ctx_init = temp.replace("_", " ")
@@ -785,12 +642,12 @@ class ConchPromptLearner(nn.Module):
                 return_tensors="pt",
             )[
                 "input_ids"
-            ]  # (1, 77)
+            ]
 
             with torch.no_grad():
-                emb = conch_model.text.token_embedding(tok).type(dtype)  # (1, 77, dim)
+                emb = conch_model.text.token_embedding(tok).type(dtype)
 
-            ctx_vectors = emb[0, 1 : 1 + n_ctx, :].clone()  # après BOS
+            ctx_vectors = emb[0, 1 : 1 + n_ctx, :].clone()
 
         else:
             n_ctx = n_ctx
@@ -816,9 +673,6 @@ class ConchPromptLearner(nn.Module):
         print(f'Initial context: "{prompt_prefix}"')
         print(f"Number of context words (tokens): {self.n_ctx}")
 
-        # -------------------------
-        # 2) tokenized prompts par classe
-        # -------------------------
         classnames = [c.replace("_", " ") for c in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]
 
@@ -843,7 +697,7 @@ class ConchPromptLearner(nn.Module):
             return_tensors="pt",
         )[
             "input_ids"
-        ]  # (n_cls, 77)
+        ]
 
         self.tokenized_prompts = tokenized
 
@@ -852,10 +706,10 @@ class ConchPromptLearner(nn.Module):
                 dtype
             )
 
-        self.register_buffer("token_prefix", embedding[:, :1, :])  # BOS
+        self.register_buffer("token_prefix", embedding[:, :1, :])
         self.register_buffer(
             "token_suffix", embedding[:, 1 + self.n_ctx :, :]
-        )  # le reste
+        )
 
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
@@ -883,9 +737,8 @@ class HFPromptLearner(nn.Module):
 
         self.token_embedding = clip_model.text_model.embeddings.token_embedding
 
-        # dims
-        self.hidden = clip_model.text_model.config.hidden_size  # ex: 512
-        self.vis_dim = clip_model.config.projection_dim  # ex: 512
+        self.hidden = clip_model.text_model.config.hidden_size
+        self.vis_dim = clip_model.config.projection_dim
 
         dtype = next(clip_model.parameters()).dtype
         device = next(clip_model.parameters()).device
@@ -903,10 +756,10 @@ class HFPromptLearner(nn.Module):
                 return_tensors="pt",
             )["input_ids"].to(
                 device
-            )  # (1, L)
+            )
 
             with torch.no_grad():
-                emb = self.token_embedding(tok)  # (1, L, hidden)
+                emb = self.token_embedding(tok)
 
             ctx_vectors = emb[0, 1 : 1 + n_ctx, :].clone()
 
@@ -927,7 +780,6 @@ class HFPromptLearner(nn.Module):
         print(f'HF Initial context: "{prompt_prefix}"')
         print(f"Number of context words (tokens): {n_ctx}")
 
-        # -------- 2) construire prompts string (EXACT CoOp) --------
         classnames = [c.replace("_", " ") for c in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]
 
@@ -952,8 +804,8 @@ class HFPromptLearner(nn.Module):
             return_tensors="pt",
         )
 
-        self.tokenized_prompts = tok_full["input_ids"].to(device)  # (n_cls, 77)
-        self.attention_mask = tok_full["attention_mask"].to(device)  # (n_cls, 77)
+        self.tokenized_prompts = tok_full["input_ids"].to(device)
+        self.attention_mask = tok_full["attention_mask"].to(device)
 
         with torch.no_grad():
             embedding = self.token_embedding(self.tokenized_prompts)
@@ -1063,13 +915,12 @@ class CustomBiomedCLIP(nn.Module):
         temp = CUSTOM_TEMPLATES[cfg.DATASET.NAME]
         prompts_ = [temp.format(c.replace("_", " ")) for c in classnames]
 
-        # --- encoder texte une fois pour l'ancre "old" ---
         device = next(self.biomed.parameters()).device
         input_ids = _tokenize_to_ids(tokenizer, prompts_, device)
 
         with torch.no_grad():
-            tf_old = self.biomed.encode_text(input_ids)          # (n_cls, D) float/half
-            tf_old = tf_old / tf_old.norm(dim=-1, keepdim=True)  # normalize
+            tf_old = self.biomed.encode_text(input_ids)
+            tf_old = tf_old / tf_old.norm(dim=-1, keepdim=True)
 
         self.register_buffer("ori_embedding", tf_old, persistent=False)
 
@@ -1078,7 +929,6 @@ class CustomBiomedCLIP(nn.Module):
         return self.biomed.encode_image(image.to(dtype=dt))
 
     def encode_text_with_ctx(self, input_ids: torch.Tensor) -> torch.Tensor:
-        # input_ids: (n_cls, L)
         device = input_ids.device
         we = self.word_embeddings
 
@@ -1090,14 +940,12 @@ class CustomBiomedCLIP(nn.Module):
         n_ctx = ctx.size(1)
 
         def _inject_ctx(module, inp, out):
-            # out: (B, L, H)
             out = out.clone()
             out[:, 1 : 1 + n_ctx, :] = ctx.to(device=out.device, dtype=out.dtype)
             return out
 
         h = we.register_forward_hook(_inject_ctx)
         try:
-            # open_clip CustomTextCLIP -> encode_text fait: BERT -> pooler -> proj
             tf = self.biomed.encode_text(input_ids)
         finally:
             h.remove()
@@ -1117,7 +965,7 @@ class CustomBiomedCLIP(nn.Module):
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
         if self.logit_scale is None:
-            logit_scale = torch.tensor(1 / 0.07, device=device)  # constant
+            logit_scale = torch.tensor(1 / 0.07, device=device)
         else:
             logit_scale = self.logit_scale.exp()
 
@@ -1192,7 +1040,7 @@ class CustomQuiltCLIP(nn.Module):
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
         if self.logit_scale is None:
-            logit_scale = torch.tensor(1 / 0.07, device=device)  # constant
+            logit_scale = torch.tensor(1 / 0.07, device=device)
         else:
             logit_scale = self.logit_scale.exp()
 
@@ -1295,7 +1143,7 @@ class CustomConchCLIP(nn.Module):
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
         if self.logit_scale is None:
-            logit_scale = torch.tensor(1 / 0.07, device=device)  # constant
+            logit_scale = torch.tensor(1 / 0.07, device=device)
         else:
             logit_scale = self.logit_scale.exp()
 
@@ -1319,16 +1167,13 @@ class CustomPubMedCLIP(nn.Module):
         self.clip_model = clip_model
         self.tokenizer = tokenizer
 
-        # prompt learner HF (celui que tu as déjà)
         self.prompt_learner = HFPromptLearner(cfg, classnames, clip_model, tokenizer)
         self.tokenized_prompts = self.prompt_learner.tokenized_prompts
         self.attention_mask = self.prompt_learner.attention_mask
 
-        # HF CLIP
         self.token_embedding = clip_model.text_model.embeddings.token_embedding
         self.logit_scale = getattr(clip_model, "logit_scale", None)
 
-        # dtype vision (souvent float32)
         self.vision_dtype = next(self.clip_model.vision_model.parameters()).dtype
         self.meta_net = self.prompt_learner.meta_net
         vis_dim = int(self.clip_model.config.projection_dim)
@@ -1378,7 +1223,6 @@ class CustomPubMedCLIP(nn.Module):
 
         h = self.token_embedding.register_forward_hook(_inject_ctx)
         try:
-            # HF CLIPModel: récupérer features texte "projetées" (dim CLIP)
             tf = self.clip_model.get_text_features(
                 input_ids=tokenized_prompts, attention_mask=attention_mask
             )
@@ -1403,7 +1247,7 @@ class CustomPubMedCLIP(nn.Module):
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
         if self.logit_scale is None:
-            logit_scale = torch.tensor(1 / 0.07, device=device)  # constant
+            logit_scale = torch.tensor(1 / 0.07, device=device)
         else:
             logit_scale = self.logit_scale.exp()
 
@@ -1433,7 +1277,6 @@ class KgCoOp(TrainerX):
         clip_model = load_clip_to_cpu(cfg)
 
         if cfg.TRAINER.COOP.PREC == "fp32" or cfg.TRAINER.COOP.PREC == "amp":
-            # CLIP's default precision is fp16
             clip_model.float()
 
         print("Building custom CLIP")
@@ -1472,7 +1315,6 @@ class KgCoOp(TrainerX):
 
         print("Turning off gradients in both the image and the text encoder")
         for name, param in self.model.named_parameters():
-            # if "prompt_learner" not in name: # and "adapter" not in name:
             if "ctx" not in name:
                 param.requires_grad_(False)
             else:
@@ -1480,8 +1322,8 @@ class KgCoOp(TrainerX):
 
         if cfg.MODEL.INIT_WEIGHTS:
             load_pretrained_weights(self.model.prompt_learner, cfg.MODEL.INIT_WEIGHTS)
-
         self.model.to(self.device)
+
         # Count of parameters
         m = self.model.module if hasattr(self.model, "module") else self.model
         tot, tr = count_params(m)
@@ -1492,10 +1334,6 @@ class KgCoOp(TrainerX):
         pl = count_params_by_module(m, "ctx")
         if pl is not None:
             print(f"[PARAMS] ctx total/trainable = {pl[0]:,} / {pl[1]:,}")
-
-        # Debug - sanity check
-        batch_debug = next(iter(self.train_loader_x))
-        sanity_check_kgcoop_safe(self, batch_debug)
 
         # NOTE: only give prompt_learner to the optimizer
         self.optim = build_optimizer(self.model.prompt_learner, cfg.OPTIM)
