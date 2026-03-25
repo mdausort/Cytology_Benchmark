@@ -21,17 +21,34 @@ from transformers import CLIPModel, CLIPTokenizerFast, CLIPProcessor
 _tokenizer = _Tokenizer()
 
 
-def count_params(m: nn.Module):
-    tot = sum(p.numel() for p in m.parameters())
-    tr = sum(p.numel() for p in m.parameters() if p.requires_grad)
-    return int(tot), int(tr)
+def count_params(model):
+    """
+    Count the total number of parameters and the number of trainable parameters.
+    Arg:
+        model: model whose parameters are counted.
+    Return:
+        total: total number of parameters.
+        trainable: number of trainable parameters.
+    """
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return total, trainable
 
 
-def count_params_by_predicate(m: nn.Module, pred):
+def count_params_by_predicate(model, pred):
+    """
+    Count the total number of parameters and trainable parameters that satisfy a given predicate.
+    Arg:
+        model: model whose parameters are counted.
+        pred: predicate applied to parameter names and tensors.
+    Return:
+        total: total number of matching parameters.
+        trainable: number of trainable matching parameters.
+    """
     tot = 0
     tr = 0
     found = False
-    for name, p in m.named_parameters():
+    for name, p in model.named_parameters():
         if pred(name, p):
             found = True
             tot += p.numel()
@@ -40,8 +57,16 @@ def count_params_by_predicate(m: nn.Module, pred):
     return (int(tot), int(tr)) if found else None
 
 
-def print_param_report(m: nn.Module, prefix="[PARAMS]"):
-    tot, tr = count_params(m)
+def print_param_report(model, prefix="[PARAMS]"):
+    """
+    Print a summary of the total, trainable, and grouped parameters of the model.
+    Arg:
+        m: model to inspect.
+        prefix: prefix used in printed messages.
+    Return:
+        None
+    """
+    tot, tr = count_params(model)
     pct = 100.0 * tr / max(tot, 1)
     print(f"{prefix} total={tot:,} | trainable={tr:,} | trainable%={pct:.4f}%")
 
@@ -55,7 +80,7 @@ def print_param_report(m: nn.Module, prefix="[PARAMS]"):
     }
 
     for k, pred in groups.items():
-        c = count_params_by_predicate(m, pred)
+        c = count_params_by_predicate(model, pred)
         if c is not None:
             kt, ktr = c
             kpct = 100.0 * ktr / max(kt, 1)
@@ -63,6 +88,13 @@ def print_param_report(m: nn.Module, prefix="[PARAMS]"):
 
 
 def _get_openclip_token_embedding(model):
+    """
+    Retrieve the token embedding layer from an OpenCLIP-like model.
+    Arg:
+        model: OpenCLIP-like model.
+    Return:
+        token_embedding: token embedding layer.
+    """
     if hasattr(model, "token_embedding"):
         return model.token_embedding
     if hasattr(model, "text") and hasattr(model.text, "token_embedding"):
@@ -107,7 +139,14 @@ def _get_openclip_token_embedding(model):
     )
 
 
-def _get_openclip_text_module(model: nn.Module) -> nn.Module:
+def _get_openclip_text_module(model):
+    """
+    Retrieve the text module from an OpenCLIP-like model.
+    Arg:
+        model: OpenCLIP-like model.
+    Return:
+        text: text module.
+    """
     if hasattr(model, "text"):
         return model.text
 
@@ -131,7 +170,14 @@ def _get_openclip_text_module(model: nn.Module) -> nn.Module:
     )
 
 
-def _get_openclip_positional_embedding(model: nn.Module) -> torch.Tensor:
+def _get_openclip_positional_embedding(model):
+    """
+    Retrieve the positional embedding from the text module.
+    Arg:
+        model: OpenCLIP-like model.
+    Return:
+        pe: positional embedding tensor.
+    """
     text = _get_openclip_text_module(model)
     for name in ["positional_embedding", "pos_embed", "position_embedding"]:
         if hasattr(text, name):
@@ -141,7 +187,14 @@ def _get_openclip_positional_embedding(model: nn.Module) -> torch.Tensor:
     raise AttributeError("Could not find positional embedding in open_clip text")
 
 
-def _get_openclip_ln_final(model: nn.Module) -> nn.Module:
+def _get_openclip_ln_final(model):
+    """
+    Retrieve the final layer normalization module from the text tower.
+    Arg:
+        model: OpenCLIP-like model.
+    Return:
+        ln_final: final layer normalization module.
+    """
     text = _get_openclip_text_module(model)
     for name in ["ln_final", "final_layer_norm", "ln"]:
         if hasattr(text, name):
@@ -149,7 +202,14 @@ def _get_openclip_ln_final(model: nn.Module) -> nn.Module:
     raise AttributeError("Could not find ln_final in open_clip text")
 
 
-def _get_openclip_text_projection(model: nn.Module):
+def _get_openclip_text_projection(model):
+    """
+    Retrieve the text projection module or tensor from the model.
+    Arg:
+        model: OpenCLIP-like model.
+    Return:
+        text_projection: text projection module or tensor.
+    """
     if hasattr(model, "text_projection"):
         return model.text_projection
     text = _get_openclip_text_module(model)
@@ -160,7 +220,14 @@ def _get_openclip_text_projection(model: nn.Module):
     return None
 
 
-def _get_openclip_text_transformer(model: nn.Module) -> nn.Module:
+def _get_openclip_text_transformer(model):
+    """
+    Retrieve the text transformer module from the model.
+    Arg:
+        model: OpenCLIP-like model.
+    Return:
+        transformer: text transformer module.
+    """
     text = _get_openclip_text_module(model)
     if hasattr(text, "transformer"):
         return text.transformer
@@ -169,7 +236,14 @@ def _get_openclip_text_transformer(model: nn.Module) -> nn.Module:
     raise AttributeError("Could not find text transformer module in open_clip text")
 
 
-def _openclip_transformer_batch_first(transformer: nn.Module) -> bool:
+def _openclip_transformer_batch_first(transformer):
+    """
+    Check whether the transformer attention blocks use batch-first format.
+    Arg:
+        transformer: transformer module.
+    Return:
+        batch_first: whether the transformer uses batch-first format.
+    """
     blocks = None
     if hasattr(transformer, "resblocks"):
         blocks = transformer.resblocks
@@ -183,6 +257,15 @@ def _openclip_transformer_batch_first(transformer: nn.Module) -> bool:
 
 
 def _hf_context_length(clip_model, tokenizer=None, default=77):
+    """
+    Retrieve the text context length for a Hugging Face CLIP-like model.
+    Arg:
+        clip_model: Hugging Face CLIP-like model.
+        tokenizer: optional tokenizer associated with the model.
+        default: default context length.
+    Return:
+        context_length: text context length.
+    """
     if tokenizer is not None and hasattr(tokenizer, "model_max_length"):
         ml = int(tokenizer.model_max_length)
         if ml > 0 and ml < 10**6:
@@ -200,7 +283,15 @@ def _hf_context_length(clip_model, tokenizer=None, default=77):
 
 
 def tokenize_any(tokenizer, texts, context_length=None, device=None):
-
+    """
+    Retrieve the text context length for a Hugging Face CLIP-like model.
+    Arg:
+        clip_model: Hugging Face CLIP-like model.
+        tokenizer: optional tokenizer associated with the model.
+        default: default context length.
+    Return:
+        context_length: text context length.
+    """
     if isinstance(texts, str):
         texts = [texts]
 
@@ -237,6 +328,16 @@ def tokenize_any(tokenizer, texts, context_length=None, device=None):
 
 
 def load_clip_to_cpu(cfg, mode):
+    """
+    Load the selected backbone on CPU and optionally inject visual prompt tuning modules.
+    Arg:
+        cfg: configuration object.
+        mode: training mode.
+    Return:
+        model: loaded model.
+        tokenizer: tokenizer associated with the model, if available.
+        preprocess: preprocessing function or transform, if available.
+    """
     backbone_name = cfg.MODEL.BACKBONE.NAME
     n_ctx_v = cfg.TRAINER.IVLP.N_CTX_VISION
     n_ctx_t = cfg.TRAINER.IVLP.N_CTX_TEXT
@@ -382,6 +483,15 @@ def load_clip_to_cpu(cfg, mode):
 
 class FixedTextFeatures(nn.Module):
     def __init__(self, classnames, clip_model, prompt_prefix="a photo of a"):
+        """
+        Initialize fixed text features computed from hand-crafted prompts.
+        Arg:
+            classnames: list of class names.
+            clip_model: CLIP model used to encode the prompts.
+            prompt_prefix: textual prefix used to build prompts.
+        Return:
+            None
+        """
         super().__init__()
         prompts = [f"{prompt_prefix} {c.replace('_', ' ')}." for c in classnames]
         tokenized = torch.cat([clip.tokenize(p) for p in prompts])
@@ -401,11 +511,29 @@ class FixedTextFeatures(nn.Module):
         self.register_buffer("text_features", feats, persistent=True)
 
     def forward(self, device, dtype):
+        """
+        Return the fixed text features on the requested device and dtype.
+        Arg:
+            device: target device.
+            dtype: target dtype.
+        Return:
+            text_features: fixed text features.
+        """
         return self.text_features.to(device=device, dtype=dtype)
 
 
 class FixedEmbeddingsBiomed(nn.Module):
-    def __init__(self, cfg, classnames, biomed_model, tokenizer):
+    def __init__(self, classnames, biomed_model, tokenizer):
+        """
+        Initialize fixed text embeddings for BiomedCLIP.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            biomed_model: BiomedCLIP model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         device = next(biomed_model.parameters()).device
         dtype = next(biomed_model.parameters()).dtype
@@ -433,12 +561,26 @@ class FixedEmbeddingsBiomed(nn.Module):
         self.register_buffer("fixed_text_features", text_features, persistent=False)
 
     def forward(self):
+        """
+        Return the precomputed fixed text features.
+        Return:
+            fixed_text_features: fixed text features.
+        """
         return self.fixed_text_features
 
 
 class FixedEmbeddingsQuilt(nn.Module):
-
-    def __init__(self, cfg, classnames, quilt_model, tokenizer):
+    def __init__(self, classnames, quilt_model, tokenizer):
+        """
+        Initialize fixed text embeddings for a Quilt/OpenCLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            quilt_model: Quilt/OpenCLIP model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         device = next(quilt_model.parameters()).device
         dtype = next(quilt_model.parameters()).dtype
@@ -459,12 +601,26 @@ class FixedEmbeddingsQuilt(nn.Module):
         self.register_buffer("fixed_text_features", text_features, persistent=False)
 
     def forward(self):
+        """
+        Return the precomputed fixed text features.
+        Return:
+            fixed_text_features: fixed text features.
+        """
         return self.fixed_text_features
 
 
 class FixedEmbeddingsConch(nn.Module):
-
-    def __init__(self, cfg, classnames, model, tokenizer):
+    def __init__(self, classnames, model, tokenizer):
+        """
+        Initialize fixed text embeddings for the Conch model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            model: Conch model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         device = next(model.parameters()).device
         dtype = next(model.parameters()).dtype
@@ -493,11 +649,26 @@ class FixedEmbeddingsConch(nn.Module):
         self.register_buffer("fixed_text_features", text_features, persistent=False)
 
     def forward(self):
+        """
+        Return the precomputed fixed text features.
+        Return:
+            fixed_text_features: fixed text features.
+        """
         return self.fixed_text_features
 
 
 class FixedEmbeddingsPubMed(nn.Module):
-    def __init__(self, cfg, classnames, clip_model, tokenizer):
+    def __init__(self, classnames, clip_model, tokenizer):
+        """
+        Initialize fixed text embeddings for a Hugging Face CLIP-based model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Hugging Face CLIP-based model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         device = next(clip_model.parameters()).device
         dtype = next(clip_model.parameters()).dtype
@@ -526,11 +697,23 @@ class FixedEmbeddingsPubMed(nn.Module):
         self.register_buffer("fixed_text_features", feats, persistent=False)
 
     def forward(self):
+        """
+        Return the precomputed fixed text features.
+        Return:
+            fixed_text_features: fixed text features.
+        """
         return self.fixed_text_features
 
 
 class TextEncoder(nn.Module):
     def __init__(self, clip_model):
+        """
+        Initialize the text encoder from the CLIP model.
+        Arg:
+            clip_model: CLIP model containing the text encoder components.
+        Return:
+            None
+        """
         super().__init__()
         self.transformer = clip_model.transformer
         self.positional_embedding = clip_model.positional_embedding
@@ -539,6 +722,14 @@ class TextEncoder(nn.Module):
         self.dtype = next(clip_model.parameters()).dtype
 
     def forward(self, prompts, tokenized_prompts):
+        """
+        Encode prompt embeddings into text features.
+        Arg:
+            prompts: embedded prompt tokens.
+            tokenized_prompts: tokenized prompts used to identify the end-of-text token.
+        Return:
+            x: encoded text features.
+        """
         tr_dtype = next(self.transformer.parameters()).dtype
         prompts = prompts.to(dtype=tr_dtype)
         pos = self.positional_embedding.to(dtype=tr_dtype)
@@ -559,7 +750,14 @@ class TextEncoder(nn.Module):
         return x
 
 
-def _is_hf_text_tower(model) -> bool:
+def _is_hf_text_tower(model):
+    """
+    Check whether the text tower follows a Hugging Face-style interface.
+    Arg:
+        model: model to inspect.
+    Return:
+        is_hf: whether the text tower is Hugging Face-based.
+    """
     return (
         hasattr(model, "text")
         and hasattr(model.text, "transformer")
@@ -568,8 +766,15 @@ def _is_hf_text_tower(model) -> bool:
 
 
 class TextEncoderBiomed(nn.Module):
-
-    def __init__(self, biomed_model: nn.Module, pad_id: int = 0):
+    def __init__(self, biomed_model, pad_id=0):
+        """
+        Initialize the text encoder wrapper for a Biomed/OpenCLIP-like model.
+        Arg:
+            biomed_model: model containing the text tower.
+            pad_id: padding token id.
+        Return:
+            None
+        """
         super().__init__()
         self.model = biomed_model
         self.pad_id = int(pad_id)
@@ -589,7 +794,17 @@ class TextEncoderBiomed(nn.Module):
                 biomed_model
             )
 
-    def _replace_ctx_tokens(self, x, deep_ctx, n_ctx: int, batch_first: bool):
+    def _replace_ctx_tokens(self, x, deep_ctx, n_ctx, batch_first):
+        """
+        Replace context token embeddings with deep prompt embeddings.
+        Arg:
+            x: token embeddings.
+            deep_ctx: deep prompt embeddings.
+            n_ctx: number of context tokens.
+            batch_first: whether the tensor uses batch-first format.
+        Return:
+            x: updated token embeddings.
+        """
         if batch_first:
             x = x.clone()
             x[:, 1 : 1 + n_ctx, :] = deep_ctx
@@ -600,6 +815,16 @@ class TextEncoderBiomed(nn.Module):
             return x
 
     def forward(self, prompts_emb, tokenized_prompts, deep_prompts=None, n_ctx=None):
+        """
+        Encode text features from prompt embeddings and optional deep prompts.
+        Arg:
+            prompts_emb: prompt embeddings.
+            tokenized_prompts: tokenized prompts.
+            deep_prompts: optional deep prompt embeddings.
+            n_ctx: number of context tokens.
+        Return:
+            feats: encoded text features.
+        """
         device = prompts_emb.device
         attn = (tokenized_prompts != self.pad_id).long().to(device=device)
 
@@ -666,28 +891,45 @@ class TextEncoderBiomed(nn.Module):
 
 
 class TextEncoderConch(nn.Module):
-
-    def __init__(self, biomed_model: nn.Module, pad_id: int = 0):
+    def __init__(self, conch_model, pad_id=0):
+        """
+        Initialize the text encoder wrapper for a Conch/OpenCLIP-like model.
+        Arg:
+            conch_model: model containing the text tower.
+            pad_id: padding token id.
+        Return:
+            None
+        """
         super().__init__()
-        self.model = biomed_model
+        self.model = conch_model
         self.pad_id = int(pad_id)
 
-        self.is_hf = _is_hf_text_tower(biomed_model)
+        self.is_hf = _is_hf_text_tower(conch_model)
 
         if not self.is_hf:
-            self.token_embedding = _get_openclip_token_embedding(biomed_model)
-            self.positional_embedding = _get_openclip_positional_embedding(biomed_model)
-            self.ln_final = _get_openclip_ln_final(biomed_model)
-            self.transformer = _get_openclip_text_transformer(biomed_model)
-            self.text_projection = _get_openclip_text_projection(biomed_model)
+            self.token_embedding = _get_openclip_token_embedding(conch_model)
+            self.positional_embedding = _get_openclip_positional_embedding(conch_model)
+            self.ln_final = _get_openclip_ln_final(conch_model)
+            self.transformer = _get_openclip_text_transformer(conch_model)
+            self.text_projection = _get_openclip_text_projection(conch_model)
             self.batch_first = _openclip_transformer_batch_first(self.transformer)
         else:
-            self.transformer = biomed_model.text.transformer
+            self.transformer = conch_model.text.transformer
             self.text_projection = _get_openclip_text_projection(
-                biomed_model
+                conch_model
             )
 
-    def _replace_ctx_tokens(self, x, deep_ctx, n_ctx: int, batch_first: bool):
+    def _replace_ctx_tokens(self, x, deep_ctx, n_ctx, batch_first):
+        """
+        Replace context token embeddings with deep prompt embeddings.
+        Arg:
+            x: token embeddings.
+            deep_ctx: deep prompt embeddings.
+            n_ctx: number of context tokens.
+            batch_first: whether the tensor uses batch-first format.
+        Return:
+            x: updated token embeddings.
+        """
         if batch_first:
             x = x.clone()
             x[:, 1 : 1 + n_ctx, :] = deep_ctx
@@ -698,6 +940,16 @@ class TextEncoderConch(nn.Module):
             return x
 
     def forward(self, prompts_emb, tokenized_prompts, deep_prompts=None, n_ctx=None):
+        """
+        Encode text features from prompt embeddings and optional deep prompts.
+        Arg:
+            prompts_emb: prompt embeddings.
+            tokenized_prompts: tokenized prompts.
+            deep_prompts: optional deep prompt embeddings.
+            n_ctx: number of context tokens.
+        Return:
+            feats: encoded text features.
+        """
         device = prompts_emb.device
         attn = (tokenized_prompts != self.pad_id).long().to(device=device)
 
@@ -767,7 +1019,17 @@ class TextEncoderConch(nn.Module):
 
 
 class TextEncoderHFCLIP(nn.Module):
-    def __init__(self, clip_model: nn.Module, pad_id: int = 0):
+    def __init__(self, clip_model, pad_id=0):
+        """
+        Encode text features from prompt embeddings and optional deep prompts.
+        Arg:
+            prompts_emb: prompt embeddings.
+            tokenized_prompts: tokenized prompts.
+            deep_prompts: optional deep prompt embeddings.
+            n_ctx: number of context tokens.
+        Return:
+            feats: encoded text features.
+        """
         super().__init__()
         self.clip = clip_model
         self.pad_id = int(pad_id)
@@ -778,12 +1040,23 @@ class TextEncoderHFCLIP(nn.Module):
 
     def forward(
         self,
-        prompts_emb: torch.Tensor,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        deep_ctx: torch.Tensor | None,
-        n_ctx: int,
-    ) -> torch.Tensor:
+        prompts_emb,
+        input_ids,
+        attention_mask,
+        deep_ctx,
+        n_ctx,
+    ):
+        """
+        Encode text features from prompt embeddings and optional deep context prompts.
+        Arg:
+            prompts_emb: prompt embeddings.
+            input_ids: tokenized prompt ids.
+            attention_mask: attention mask associated with the prompts.
+            deep_ctx: optional deep context prompts.
+            n_ctx: number of context tokens.
+        Return:
+            feats: encoded text features.
+        """
         device = prompts_emb.device
         x = prompts_emb
 
@@ -821,6 +1094,15 @@ class TextEncoderHFCLIP(nn.Module):
 
 class VLPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
+        """
+        Initialize the vision-language prompt learner for the original CLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: CLIP backbone model.
+        Return:
+            None
+        """
         super().__init__()
         n_cls = len(classnames)
         assert cfg.TRAINER.IVLP.PROMPT_DEPTH_TEXT >= 1, (
@@ -874,11 +1156,19 @@ class VLPromptLearner(nn.Module):
 
         self.n_cls = n_cls
         self.n_ctx = n_ctx
-        self.tokenized_prompts = tokenized_prompts 
+        self.tokenized_prompts = tokenized_prompts
         self.name_lens = name_lens
 
     def construct_prompts(self, ctx, prefix, suffix, label=None):
-
+        """
+        Initialize the vision-language prompt learner for the original CLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: CLIP backbone model.
+        Return:
+            None
+        """
         if label is not None:
             prefix = prefix[label]
             suffix = suffix[label]
@@ -895,6 +1185,11 @@ class VLPromptLearner(nn.Module):
         return prompts
 
     def forward(self):
+        """
+        Build shallow prompt embeddings for all classes.
+        Return:
+            prompts: prompt embeddings for all classes.
+        """
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
@@ -910,6 +1205,18 @@ class BiomedVLPromptLearner(nn.Module):
     def __init__(
         self, cfg, classnames, biomed_model, hidden_size, tokenizer, word_embeddings
     ):
+        """
+        Initialize the vision-language prompt learner for BiomedCLIP.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            biomed_model: BiomedCLIP model.
+            hidden_size: text embedding dimension.
+            tokenizer: tokenizer associated with the model.
+            word_embeddings: text embedding layer.
+        Return:
+            None
+        """
         super().__init__()
         device = next(biomed_model.parameters()).device
 
@@ -979,7 +1286,16 @@ class BiomedVLPromptLearner(nn.Module):
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def construct_prompts(self, ctx, prefix, suffix, label=None):
-
+        """
+        Construct full prompt embeddings from prefix, context, and suffix.
+        Arg:
+            ctx: learnable context embeddings.
+            prefix: fixed prefix embeddings.
+            suffix: fixed suffix embeddings.
+            label: optional class label index.
+        Return:
+            prompts: complete prompt embeddings.
+        """
         if label is not None:
             prefix = prefix[label]
             suffix = suffix[label]
@@ -996,6 +1312,11 @@ class BiomedVLPromptLearner(nn.Module):
         return prompts
 
     def forward(self):
+        """
+        Build shallow prompt embeddings for all classes.
+        Return:
+            prompts: prompt embeddings for all classes.
+        """
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
@@ -1011,6 +1332,16 @@ class BiomedVLPromptLearner(nn.Module):
 
 class QuiltVLPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, quilt_model, tokenizer):
+        """
+        Initialize the vision-language prompt learner for a Quilt/OpenCLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            quilt_model: Quilt/OpenCLIP model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.n_cls = len(classnames)
 
@@ -1079,9 +1410,24 @@ class QuiltVLPromptLearner(nn.Module):
         )
 
     def construct_prompts(self, ctx_for_classes, prefix, suffix):
+        """
+        Construct full prompt embeddings from prefix, context, and suffix.
+        Arg:
+            ctx_for_classes: class-specific context embeddings.
+            prefix: fixed prefix embeddings.
+            suffix: fixed suffix embeddings.
+        Return:
+            prompts: complete prompt embeddings.
+        """
         return torch.cat([prefix, ctx_for_classes, suffix], dim=1)
 
     def forward(self):
+        """
+        Build prompt embeddings and optional deep prompts for all classes.
+        Return:
+            prompts: prompt embeddings for all classes.
+            deep: optional deep prompt embeddings.
+        """
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
@@ -1097,6 +1443,16 @@ class QuiltVLPromptLearner(nn.Module):
 
 class ConchVLPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, conch_model, tokenizer):
+        """
+        Initialize the vision-language prompt learner for the Conch model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            conch_model: Conch model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.tokenizer = tokenizer
         self.n_cls = len(classnames)
@@ -1175,9 +1531,24 @@ class ConchVLPromptLearner(nn.Module):
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def construct_prompts(self, ctx_for_classes, prefix, suffix):
+        """
+        Construct full prompt embeddings from prefix, context, and suffix.
+        Arg:
+            ctx_for_classes: class-specific context embeddings.
+            prefix: fixed prefix embeddings.
+            suffix: fixed suffix embeddings.
+        Return:
+            prompts: complete prompt embeddings.
+        """
         return torch.cat([prefix, ctx_for_classes, suffix], dim=1)
 
     def forward(self):
+        """
+        Build prompt embeddings and optional deep prompts for all classes.
+        Return:
+            prompts: prompt embeddings for all classes.
+            deep: optional deep prompt embeddings.
+        """
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
@@ -1193,6 +1564,16 @@ class ConchVLPromptLearner(nn.Module):
 
 class HFVLPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the vision-language prompt learner for a Hugging Face CLIP-based model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Hugging Face CLIP-based model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.tokenizer = tokenizer
         self.n_cls = len(classnames)
@@ -1268,9 +1649,24 @@ class HFVLPromptLearner(nn.Module):
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def construct_prompts(self, ctx_for_classes, prefix, suffix):
+        """
+        Construct full prompt embeddings from prefix, context, and suffix.
+        Arg:
+            ctx_for_classes: class-specific context embeddings.
+            prefix: fixed prefix embeddings.
+            suffix: fixed suffix embeddings.
+        Return:
+            prompts: complete prompt embeddings.
+        """
         return torch.cat([prefix, ctx_for_classes, suffix], dim=1)
 
     def forward(self):
+        """
+        Build prompt embeddings and optional deep prompts for all classes.
+        Return:
+            prompts: prompt embeddings for all classes.
+            deep: optional deep prompt embeddings.
+        """
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
@@ -1286,8 +1682,18 @@ class HFVLPromptLearner(nn.Module):
 
 class TimmVisionVPT(nn.Module):
     def __init__(
-        self, timm_vit: nn.Module, n_ctx: int, v_depth: int, return_tokens=False
+        self, timm_vit, n_ctx, v_depth, return_tokens=False
     ):
+        """
+        Initialize the visual prompt tuning wrapper for a timm vision transformer.
+        Arg:
+            timm_vit: timm vision transformer.
+            n_ctx: number of visual prompt tokens.
+            v_depth: number of layers using visual prompts.
+            return_tokens: whether to return all tokens instead of the pooled feature.
+        Return:
+            None
+        """
         super().__init__()
         self.vit = timm_vit
         self.n_ctx = int(n_ctx)
@@ -1345,6 +1751,13 @@ class TimmVisionVPT(nn.Module):
                     self.VPT_layers.append(nn.Parameter(pi))
 
     def _append_vpt0(self, x):
+        """
+        Append the initial visual prompt tokens to the token sequence.
+        Arg:
+            x: input token sequence.
+        Return:
+            x: token sequence with appended visual prompts.
+        """
         vpt = (
             self.VPT0.to(dtype=x.dtype, device=x.device)
             .unsqueeze(0)
@@ -1352,13 +1765,28 @@ class TimmVisionVPT(nn.Module):
         )
         return torch.cat([x, vpt], dim=1)
 
-    def _replace_vpt_for_layer(self, x, layer_idx: int):
+    def _replace_vpt_for_layer(self, x, layer_idx):
+        """
+        Replace the visual prompt tokens for a specific transformer layer.
+        Arg:
+            x: input token sequence.
+            layer_idx: transformer layer index.
+        Return:
+            x: token sequence with updated visual prompts.
+        """
         x_prefix = x[:, : x.size(1) - self.n_ctx, :]
         vpt = self.VPT_layers[layer_idx - 1].to(dtype=x.dtype, device=x.device)
         vpt = vpt.unsqueeze(0).expand(x.size(0), -1, -1)
         return torch.cat([x_prefix, vpt], dim=1)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x):
+        """
+        Encode images with visual prompt tuning.
+        Arg:
+            x: input image batch.
+        Return:
+            feat: encoded visual features or tokens.
+        """
         x = self.vit.patch_embed(x)
 
         if x.dim() == 4:
@@ -1407,7 +1835,16 @@ class TimmVisionVPT(nn.Module):
 
 
 class OpenClipVisionVPT(nn.Module):
-    def __init__(self, visual, n_ctx: int, v_depth: int = 1):
+    def __init__(self, visual, n_ctx, v_depth=1):
+        """
+        Initialize the visual prompt tuning wrapper for an OpenCLIP vision tower.
+        Arg:
+            visual: OpenCLIP vision tower.
+            n_ctx: number of visual prompt tokens.
+            v_depth: number of layers using visual prompts.
+        Return:
+            None
+        """
         super().__init__()
         self.base = visual
         self.n_ctx = int(n_ctx)
@@ -1435,6 +1872,13 @@ class OpenClipVisionVPT(nn.Module):
                     self.VPT_layers.append(p)
 
     def _append_vpt0_BLD(self, x):
+        """
+        Append the initial visual prompt tokens to the token sequence.
+        Arg:
+            x: input token sequence.
+        Return:
+            x: token sequence with appended visual prompts.
+        """
         vpt = (
             self.VPT0.to(dtype=x.dtype, device=x.device)
             .unsqueeze(0)
@@ -1442,7 +1886,15 @@ class OpenClipVisionVPT(nn.Module):
         )
         return torch.cat([x, vpt], dim=1)
 
-    def _replace_vpt_LBD(self, x, layer_idx: int):
+    def _replace_vpt_LBD(self, x, layer_idx):
+        """
+        Replace the visual prompt tokens for a specific transformer layer.
+        Arg:
+            x: input token sequence.
+            layer_idx: transformer layer index.
+        Return:
+            x: token sequence with updated visual prompts.
+        """
         prefix = x[: -self.n_ctx, :, :]
         vpt = self.VPT_layers[layer_idx - 1].to(
             dtype=x.dtype, device=x.device
@@ -1450,7 +1902,15 @@ class OpenClipVisionVPT(nn.Module):
         vpt = vpt.unsqueeze(1).expand(-1, x.shape[1], -1)
         return torch.cat([prefix, vpt], dim=0)
 
-    def _replace_vpt_for_layer_BLD(self, x, layer_idx: int):
+    def _replace_vpt_for_layer_BLD(self, x, layer_idx):
+        """
+        Replace the visual prompt tokens for a specific transformer layer.
+        Arg:
+            x: input token sequence.
+            layer_idx: transformer layer index.
+        Return:
+            x: token sequence with updated visual prompts.
+        """
         prefix = x[:, : -self.n_ctx, :]
         vpt = (
             self.VPT_layers[layer_idx - 1]
@@ -1460,6 +1920,13 @@ class OpenClipVisionVPT(nn.Module):
         return torch.cat([prefix, vpt], dim=1)
 
     def forward(self, x):
+        """
+        Encode images with visual prompt tuning.
+        Arg:
+            x: input image batch.
+        Return:
+            feat: encoded visual features.
+        """
         x = x.to(
             dtype=self.base.conv1.weight.dtype, device=self.base.conv1.weight.device
         )
@@ -1521,8 +1988,16 @@ class OpenClipVisionVPT(nn.Module):
 
 
 class OpenAIVisionVPT(nn.Module):
-
-    def __init__(self, visual_vit: nn.Module, n_ctx: int, v_depth: int):
+    def __init__(self, visual_vit, n_ctx, v_depth):
+        """
+        Initialize the visual prompt tuning wrapper for an OpenAI CLIP vision transformer.
+        Arg:
+            visual_vit: OpenAI CLIP vision transformer.
+            n_ctx: number of visual prompt tokens.
+            v_depth: number of layers using visual prompts.
+        Return:
+            None
+        """
         super().__init__()
         self.base = visual_vit
         self.n_ctx = int(n_ctx)
@@ -1547,6 +2022,13 @@ class OpenAIVisionVPT(nn.Module):
                     self.VPT_layers.append(nn.Parameter(pi))
 
     def _append_vpt0_NLD(self, x):
+        """
+        Append the initial visual prompt tokens to the token sequence (NLD format).
+        Arg:
+            x: input token sequence of shape (batch_size, num_tokens, dim).
+        Return:
+            x: token sequence with appended visual prompt tokens along the token dimension.
+        """
         vpt = (
             self.VPT0.to(dtype=x.dtype, device=x.device)
             .unsqueeze(0)
@@ -1554,7 +2036,15 @@ class OpenAIVisionVPT(nn.Module):
         )
         return torch.cat([x, vpt], dim=1)
 
-    def _replace_vpt_for_layer_LND(self, x, layer_idx: int):
+    def _replace_vpt_for_layer_LND(self, x, layer_idx):
+        """
+        Replace the visual prompt tokens for a specific transformer layer (LND format).
+        Arg:
+            x: input token sequence of shape (num_tokens, batch_size, dim).
+            layer_idx: index of the transformer layer.
+        Return:
+            x: token sequence where the last n_ctx tokens are replaced by layer-specific prompts.
+        """
         prefix = x[: x.shape[0] - self.n_ctx, :, :]
         vpt = self.VPT_layers[layer_idx - 1].to(
             dtype=x.dtype, device=x.device
@@ -1562,7 +2052,14 @@ class OpenAIVisionVPT(nn.Module):
         vpt = vpt.unsqueeze(1).expand(-1, x.shape[1], -1)
         return torch.cat([prefix, vpt], dim=0)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x):
+        """
+        Encode images with visual prompt tuning.
+        Arg:
+            x: input image batch.
+        Return:
+            x: encoded visual features.
+        """
         x = x.to(
             dtype=self.base.conv1.weight.dtype, device=self.base.conv1.weight.device
         )
@@ -1610,8 +2107,16 @@ class OpenAIVisionVPT(nn.Module):
 
 
 class HFCLIPVisionVPT(nn.Module):
-
-    def __init__(self, vision_model: nn.Module, n_ctx: int, v_depth: int):
+    def __init__(self, vision_model, n_ctx, v_depth):
+        """
+        Initialize the visual prompt tuning wrapper for a Hugging Face CLIP vision model.
+        Arg:
+            vision_model: Hugging Face CLIP vision model.
+            n_ctx: number of visual prompt tokens.
+            v_depth: number of layers using visual prompts.
+        Return:
+            None
+        """
         super().__init__()
         self.base = vision_model
         self.n_ctx = int(n_ctx)
@@ -1632,6 +2137,13 @@ class HFCLIPVisionVPT(nn.Module):
                     self.VPT_layers.append(nn.Parameter(pi))
 
     def _append_vpt(self, x):
+        """
+        Append visual prompt tokens to the token sequence.
+        Arg:
+            x: input token sequence.
+        Return:
+            token sequence with appended visual prompts.
+        """
         vpt = (
             self.VPT0.to(dtype=x.dtype, device=x.device)
             .unsqueeze(0)
@@ -1639,13 +2151,28 @@ class HFCLIPVisionVPT(nn.Module):
         )
         return torch.cat([x, vpt], dim=1)
 
-    def _replace_vpt(self, x, layer_idx: int):
+    def _replace_vpt(self, x, layer_idx):
+        """
+        Replace the visual prompt tokens for a specific transformer layer.
+        Arg:
+            x: input token sequence.
+            layer_idx: transformer layer index.
+        Return:
+            token sequence with updated visual prompts.
+        """
         prefix = x[:, : x.size(1) - self.n_ctx, :]
         vpt = self.VPT_layers[layer_idx - 1].to(dtype=x.dtype, device=x.device)
         vpt = vpt.unsqueeze(0).expand(x.size(0), -1, -1)
         return torch.cat([prefix, vpt], dim=1)
 
-    def forward(self, pixel_values: torch.Tensor):
+    def forward(self, pixel_values):
+        """
+        Encode images with visual prompt tuning.
+        Arg:
+            pixel_values: input image batch.
+        Return:
+            encoded visual features.
+        """
         x = self.base.embeddings(pixel_values)
 
         if self.use:
@@ -1672,8 +2199,16 @@ class HFCLIPVisionVPT(nn.Module):
 
 
 class DinoVisionVPT(nn.Module):
-
-    def __init__(self, dino_vit: nn.Module, n_ctx: int, v_depth: int):
+    def __init__(self, dino_vit, n_ctx, v_depth):
+        """
+        Initialize the visual prompt tuning wrapper for a DINO vision transformer.
+        Arg:
+            dino_vit: DINO vision transformer.
+            n_ctx: number of visual prompt tokens.
+            v_depth: number of layers using visual prompts.
+        Return:
+            None
+        """
         super().__init__()
         self.vit = dino_vit
         self.n_ctx = int(n_ctx)
@@ -1699,6 +2234,14 @@ class DinoVisionVPT(nn.Module):
         self.num_features = embed_dim
 
     def _unpack_tokens(self, x):
+        """
+        Extract token tensors from the DINO block input or output format.
+        Arg:
+            x: block input or output.
+        Return:
+            tokens: extracted token tensor.
+            packinfo: metadata used to reconstruct the original format.
+        """
         if torch.is_tensor(x):
             return x, None
 
@@ -1710,6 +2253,14 @@ class DinoVisionVPT(nn.Module):
         raise TypeError(f"Unsupported Dino output type from patch_embed: {type(x)}")
 
     def _repack_tokens(self, tokens, packinfo):
+        """
+        Reconstruct the original object format from token tensors.
+        Arg:
+            tokens: token tensor.
+            packinfo: metadata describing the original format.
+        Return:
+            out: reconstructed object.
+        """
         if packinfo is None:
             return tokens
         kind, obj = packinfo
@@ -1722,11 +2273,26 @@ class DinoVisionVPT(nn.Module):
         return tokens
 
     def _append_vpt(self, tokens):
+        """
+        Append visual prompt tokens to the token sequence.
+        Arg:
+            tokens: input token sequence.
+        Return:
+            token sequence with appended visual prompts.
+        """
         vpt = self.VPT0.to(dtype=tokens.dtype, device=tokens.device).unsqueeze(0)
         vpt = vpt.expand(tokens.size(0), -1, -1)
         return torch.cat([tokens, vpt], dim=1)
 
-    def _replace_vpt(self, tokens, layer_idx: int):
+    def _replace_vpt(self, tokens, layer_idx):
+        """
+        Replace the visual prompt tokens for a specific transformer layer.
+        Arg:
+            x: input token sequence.
+            layer_idx: transformer layer index.
+        Return:
+            token sequence with updated visual prompts.
+        """
         prefix = tokens[:, : tokens.size(1) - self.n_ctx, :]
         vpt = self.VPT_layers[layer_idx - 1].to(
             dtype=tokens.dtype, device=tokens.device
@@ -1734,7 +2300,14 @@ class DinoVisionVPT(nn.Module):
         vpt = vpt.unsqueeze(0).expand(tokens.size(0), -1, -1)
         return torch.cat([prefix, vpt], dim=1)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x):
+        """
+        Encode images with visual prompt tuning.
+        Arg:
+            x: input image batch.
+        Return:
+            t: encoded visual features.
+        """
         out = self.vit.patch_embed(x)
         tokens, packinfo = self._unpack_tokens(out)
 
@@ -1767,12 +2340,25 @@ class VisionOnlyFromVLM(nn.Module):
         self,
         cfg,
         classnames,
-        backbone: nn.Module,
-        backend: str = "generic",
-        feat_dim: int | None = None,
-        force_fp32_head: bool = True,
-        normalize_feats: bool = True,
+        backbone,
+        backend,
+        feat_dim,
+        force_fp32_head,
+        normalize_feats,
     ):
+        """
+        Initialize a vision-only classifier built from a vision-language backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            backbone: backbone model.
+            backend: backend type.
+            feat_dim: feature dimension. If None, it is inferred automatically.
+            force_fp32_head: whether to use float32 features in the classification head.
+            normalize_feats: whether to normalize image features.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.backbone = backbone
@@ -1788,7 +2374,12 @@ class VisionOnlyFromVLM(nn.Module):
         self.head = nn.Linear(self.feat_dim, self.num_classes)
 
     @torch.no_grad()
-    def _infer_feat_dim_cpu(self) -> int:
+    def _infer_feat_dim_cpu(self):
+        """
+        Infer the image feature dimension using a dummy forward pass on CPU.
+        Return:
+            dim: inferred feature dimension.
+        """
         params = list(self.backbone.parameters())
         if len(params) > 0:
             orig_device = params[0].device
@@ -1815,7 +2406,12 @@ class VisionOnlyFromVLM(nn.Module):
         self.backbone.to(device=orig_device, dtype=orig_dtype)
         return dim
 
-    def encode_image_features(self, image: torch.Tensor) -> torch.Tensor:
+    def encode_image_features(self, image):
+        """
+        Infer the image feature dimension using a dummy forward pass on CPU.
+        Return:
+            dim: inferred feature dimension.
+        """
         if self.backend == "hf_clip":
             clipm = self.backbone
             dtype = (
@@ -1848,7 +2444,14 @@ class VisionOnlyFromVLM(nn.Module):
 
         raise AttributeError("No encode_image/visual found for this backbone")
 
-    def forward(self, image: torch.Tensor, label: torch.Tensor | None = None):
+    def forward(self, image, label=None):
+        """
+        Encode input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            feats: encoded image features.
+        """
         feats = self.encode_image_features(image)
 
         if self.normalize_feats:
@@ -1863,6 +2466,15 @@ class VisionOnlyFromVLM(nn.Module):
 
 class CustomCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
+        """
+        Initialize the IVLP model based on the original CLIP backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: CLIP backbone model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -1885,6 +2497,15 @@ class CustomCLIP(nn.Module):
         self.fixed_text = FixedTextFeatures(classnames, clip_model)
 
     def forward(self, image, label=None):
+        """
+        Compute classification logits or training loss from image and text features.
+        Arg:
+            image: input image batch.
+            label: target labels used during training.
+        Return:
+            logits: classification logits during evaluation.
+            loss: cross-entropy loss during training.
+        """
         logit_scale = self.logit_scale.exp()
         if hasattr(self.image_encoder, "base") and hasattr(
             self.image_encoder.base, "conv1"
@@ -1918,6 +2539,16 @@ class CustomCLIP(nn.Module):
 
 class CustomBiomedCLIP(nn.Module):
     def __init__(self, cfg, classnames, biomed_model, tokenizer):
+        """
+        Initialize the IVLP model based on BiomedCLIP.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            biomed_model: BiomedCLIP model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -1949,10 +2580,17 @@ class CustomBiomedCLIP(nn.Module):
             self.tokenized_prompts = None
             self.text_encoder = None
             self.fixed_text = FixedEmbeddingsBiomed(
-                cfg, classnames, biomed_model, tokenizer
+                classnames, biomed_model, tokenizer
             )
 
-    def encode_image(self, image: torch.Tensor) -> torch.Tensor:
+    def encode_image(self, image):
+        """
+        Encode the input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            image_features: encoded image features.
+        """
         m = self.clip_model
         dtype = next(m.parameters()).dtype
         if hasattr(m, "encode_image"):
@@ -1962,6 +2600,15 @@ class CustomBiomedCLIP(nn.Module):
         raise AttributeError("BiomedCLIP model has no encode_image/visual")
 
     def forward(self, image, label=None):
+        """
+        Compute classification logits or training loss from image and text features.
+        Arg:
+            image: input image batch.
+            label: target labels used during training.
+        Return:
+            logits: classification logits during evaluation.
+            loss: cross-entropy loss during training.
+        """
         if self.logit_scale is None:
             logit_scale = torch.tensor(1.0, device=image.device)
         else:
@@ -1996,6 +2643,16 @@ class CustomBiomedCLIP(nn.Module):
 
 class CustomQuiltCLIP(nn.Module):
     def __init__(self, cfg, classnames, quilt_model, tokenizer):
+        """
+        Initialize the IVLP model based on a Quilt/OpenCLIP backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            quilt_model: Quilt/OpenCLIP model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -2021,10 +2678,17 @@ class CustomQuiltCLIP(nn.Module):
             self.tokenized_prompts = None
             self.text_encoder = None
             self.fixed_text = FixedEmbeddingsQuilt(
-                cfg, classnames, quilt_model, tokenizer
+                classnames, quilt_model, tokenizer
             )
 
-    def encode_image(self, image: torch.Tensor) -> torch.Tensor:
+    def encode_image(self, image):
+        """
+        Encode the input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            image_features: encoded image features.
+        """
         m = self.clip_model
         dtype = next(m.parameters()).dtype
         if hasattr(m, "encode_image"):
@@ -2034,6 +2698,15 @@ class CustomQuiltCLIP(nn.Module):
         raise AttributeError("Quilt model has no encode_image/visual")
 
     def forward(self, image, label=None):
+        """
+        Compute classification logits or training loss from image and text features.
+        Arg:
+            image: input image batch.
+            label: target labels used during training.
+        Return:
+            logits: classification logits during evaluation.
+            loss: cross-entropy loss during training.
+        """
         if self.logit_scale is None:
             logit_scale = torch.tensor(1.0, device=image.device)
         else:
@@ -2068,6 +2741,16 @@ class CustomQuiltCLIP(nn.Module):
 
 class CustomConchCLIP(nn.Module):
     def __init__(self, cfg, classnames, conch_model, tokenizer):
+        """
+        Initialize the IVLP model based on the Conch backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            conch_model: Conch model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -2098,10 +2781,17 @@ class CustomConchCLIP(nn.Module):
             self.text_encoder = None
 
             self.fixed_text = FixedEmbeddingsConch(
-                cfg, classnames, conch_model, tokenizer
+                classnames, conch_model, tokenizer
             )
 
     def encode_image(self, image):
+        """
+        Encode the input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            image_features: encoded image features.
+        """
         m = self.clip_model
         dtype = next(m.parameters()).dtype
 
@@ -2114,7 +2804,15 @@ class CustomConchCLIP(nn.Module):
         raise AttributeError("Conch model has no encode_image")
 
     def forward(self, image, label=None):
-
+        """
+        Compute classification logits or training loss from image and text features.
+        Arg:
+            image: input image batch.
+            label: target labels used during training.
+        Return:
+            logits: classification logits during evaluation.
+            loss: cross-entropy loss during training.
+        """
         if self.logit_scale is None:
             logit_scale = torch.tensor(1.0, device=image.device)
         else:
@@ -2153,7 +2851,18 @@ class CustomConchCLIP(nn.Module):
 
 
 class CustomPubMedCLIP(nn.Module):
-    def __init__(self, cfg, classnames, clip_model, tokenizer, pad_id: int = 0):
+    def __init__(self, cfg, classnames, clip_model, tokenizer, pad_id=0):
+        """
+        Initialize the IVLP model based on a Hugging Face CLIP-based model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Hugging Face CLIP-based model.
+            tokenizer: tokenizer associated with the model.
+            pad_id: padding token id.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -2175,10 +2884,17 @@ class CustomPubMedCLIP(nn.Module):
             self.text_encoder = None
 
             self.fixed_text = FixedEmbeddingsPubMed(
-                cfg, classnames, clip_model, tokenizer
+                classnames, clip_model, tokenizer
             )
 
-    def _encode_image(self, image: torch.Tensor) -> torch.Tensor:
+    def _encode_image(self, image):
+        """
+        Encode the input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            image_features: encoded image features.
+        """
         dtype = next(self.clip.parameters()).dtype
 
         if (
@@ -2192,6 +2908,15 @@ class CustomPubMedCLIP(nn.Module):
         return self.clip.get_image_features(pixel_values=image.to(dtype=dtype))
 
     def forward(self, image, label=None):
+        """
+        Compute classification logits or training loss from image and text features.
+        Arg:
+            image: input image batch.
+            label: target labels used during training.
+        Return:
+            logits: classification logits during evaluation.
+            loss: cross-entropy loss during training.
+        """
         device = image.device
 
         image_features = self._encode_image(image)
@@ -2241,8 +2966,16 @@ class CustomPubMedCLIP(nn.Module):
 
 
 class CustomDinoBloom(nn.Module):
-
-    def __init__(self, cfg, classnames, dino_model: nn.Module):
+    def __init__(self, cfg, classnames, dino_model):
+        """
+        Initialize the IVLP model based on a DINO backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            dino_model: DINO backbone model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.backbone = dino_model
@@ -2257,6 +2990,15 @@ class CustomDinoBloom(nn.Module):
         self.head = nn.Linear(feat_dim, self.num_classes)
 
     def forward(self, image, label=None):
+        """
+        Compute classification logits or training loss from image and text features.
+        Arg:
+            image: input image batch.
+            label: target labels used during training.
+        Return:
+            logits: classification logits during evaluation.
+            loss: cross-entropy loss during training.
+        """
         dtype = next(self.backbone.parameters()).dtype
         feats = self.backbone(image.to(dtype=dtype))
         logits = self.head(feats.float())
@@ -2268,6 +3010,13 @@ class CustomDinoBloom(nn.Module):
 
 
 def unwrap_visual(v):
+    """
+    Unwrap nested visual prompt tuning wrappers and return the base visual module.
+    Arg:
+        v: visual module or wrapped visual module.
+    Return:
+        v: unwrapped visual module.
+    """
     while isinstance(v, OpenClipVisionVPT):
         v = v.base
     return v
@@ -2286,7 +3035,7 @@ class IVLP(TrainerX):
         classnames = self.dm.dataset.classnames
 
         print(f"Loading CLIP (backbone: {cfg.MODEL.BACKBONE.NAME})")
-        clip_model, tokenizer, preprocess = load_clip_to_cpu(cfg, mode)
+        clip_model, tokenizer, _ = load_clip_to_cpu(cfg, mode)
 
         if cfg.TRAINER.IVLP.PREC == "fp32" or cfg.TRAINER.IVLP.PREC == "amp":
             clip_model.float()

@@ -36,13 +36,29 @@ CUSTOM_TEMPLATES = {
 }
 
 
-def count_params(model: nn.Module):
+def count_params(model):
+    """
+    Count the total number of parameters and the number of trainable parameters.
+    Arg:
+        model: model whose parameters are counted.
+    Return:
+        total: total number of parameters.
+        trainable: number of trainable parameters.
+    """
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total, trainable
 
 
-def count_params_by_module(model: nn.Module, key="prompt_learner"):
+def count_params_by_module(model, key="prompt_learner"):
+    """
+    Infer the visual feature dimension by running the image encoder on a dummy input.
+    Arg:
+        model: model containing an image encoder.
+        image_size: input image size used for the dummy forward pass.
+    Return:
+        d: inferred visual feature dimension.
+    """
     sub = dict(model.named_modules()).get(key, None)
     if sub is None:
         return None
@@ -53,6 +69,14 @@ def count_params_by_module(model: nn.Module, key="prompt_learner"):
 
 @torch.no_grad()
 def vis_dim_from_encode_image_strict(model, image_size=224):
+    """
+    Infer the visual feature dimension by running the image encoder on a dummy input.
+    Arg:
+        model: model containing an image encoder.
+        image_size: input image size used for the dummy forward pass.
+    Return:
+        d: inferred visual feature dimension.
+    """
     was_training = model.training
     model.eval()
 
@@ -78,6 +102,15 @@ def vis_dim_from_encode_image_strict(model, image_size=224):
 
 
 def _tokenize_to_ids(tokenizer, texts, device):
+    """
+    Tokenize input texts and convert them to token ids on the target device.
+    Arg:
+        tokenizer: tokenizer used to encode the texts.
+        texts: list of input texts.
+        device: target device.
+    Return:
+        ids: token ids moved to the target device.
+    """
     tok = tokenizer(texts)
 
     if isinstance(tok, dict):
@@ -98,7 +131,13 @@ def _tokenize_to_ids(tokenizer, texts, device):
 
 
 def _get_openclip_token_embedding(model):
-
+    """
+    Retrieve the token embedding layer from an OpenCLIP-like model.
+    Arg:
+        model: OpenCLIP-like model.
+    Return:
+        token_embedding: token embedding layer.
+    """
     if hasattr(model, "token_embedding"):
         return model.token_embedding
     if hasattr(model, "text") and hasattr(model.text, "token_embedding"):
@@ -113,6 +152,13 @@ def _get_openclip_token_embedding(model):
 
 
 def load_clip_to_cpu(cfg):
+    """
+    Load the selected CLIP-like backbone on CPU.
+    Arg:
+        cfg: configuration object containing the backbone name.
+    Return:
+        model: loaded backbone model.
+    """
     backbone_name = cfg.MODEL.BACKBONE.NAME
 
     if backbone_name == "BiomedCLIP":
@@ -177,6 +223,13 @@ def load_clip_to_cpu(cfg):
 
 class TextEncoder(nn.Module):
     def __init__(self, clip_model):
+        """
+        Initialize the text encoder from the CLIP model.
+        Arg:
+            clip_model: CLIP model containing the text encoder components.
+        Return:
+            None
+        """
         super().__init__()
         self.transformer = clip_model.transformer
         self.positional_embedding = clip_model.positional_embedding
@@ -185,6 +238,14 @@ class TextEncoder(nn.Module):
         self.dtype = clip_model.dtype
 
     def forward(self, prompts, tokenized_prompts):
+        """
+        Encode prompt embeddings into text features.
+        Arg:
+            prompts: embedded prompt tokens.
+            tokenized_prompts: tokenized prompts used to identify the end-of-text token.
+        Return:
+            x: encoded text features.
+        """
         tr_dtype = next(self.transformer.parameters()).dtype
 
         prompts = prompts.to(dtype=tr_dtype)
@@ -209,6 +270,15 @@ class TextEncoder(nn.Module):
 
 class PromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
+        """
+        Initialize the prompt learner for the original CLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: CLIP backbone model.
+        Return:
+            None
+        """
         super().__init__()
         n_cls = len(classnames)
         n_ctx = cfg.TRAINER.COOP.N_CTX
@@ -297,6 +367,12 @@ class PromptLearner(nn.Module):
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def forward(self):
+        """
+        Build the complete prompts by combining prefix, learnable context,
+        and suffix tokens.
+        Return:
+            prompts: prompt embeddings for all classes.
+        """
         ctx = self.ctx
 
         if ctx.dim() == 2:
@@ -321,6 +397,18 @@ class BiomedPromptLearner(nn.Module):
     def __init__(
         self, cfg, classnames, biomed_model, hidden_size, tokenizer, word_embeddings
     ):
+        """
+        Initialize the prompt learner for BiomedCLIP.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            biomed_model: BiomedCLIP model.
+            hidden_size: text embedding dimension.
+            tokenizer: tokenizer associated with the model.
+            word_embeddings: word embedding layer of the text encoder.
+        Return:
+            None
+        """
         super().__init__()
         device = next(biomed_model.parameters()).device
 
@@ -442,6 +530,16 @@ class BiomedPromptLearner(nn.Module):
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def forward(self, batch_size, device, dtype):
+        """
+        Build the complete prompts by combining prefix, learnable context,
+        and suffix tokens.
+        Arg:
+            batch_size: number of prompt sets to generate.
+            device: target device.
+            dtype: target dtype.
+        Return:
+            prompts: prompt embeddings.
+        """
         ctx = self.ctx.to(device=device, dtype=dtype)
 
         if ctx.dim() == 2:
@@ -464,6 +562,16 @@ class BiomedPromptLearner(nn.Module):
 
 class QuiltPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, quilt_model, tokenizer):
+        """
+        Initialize the prompt learner for a Quilt/OpenCLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            quilt_model: Quilt/OpenCLIP backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.classnames = classnames
         self.cfg = cfg
@@ -579,6 +687,12 @@ class QuiltPromptLearner(nn.Module):
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def forward(self):
+        """
+        Build the complete prompts by combining prefix, learnable context,
+        and suffix tokens.
+        Return:
+            prompts: prompt embeddings for all classes.
+        """
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
@@ -600,6 +714,16 @@ class QuiltPromptLearner(nn.Module):
 
 class ConchPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, conch_model, tokenizer):
+        """
+        Initialize the prompt learner for the Conch model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            conch_model: Conch backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.classnames = classnames
         self.cfg = cfg
@@ -714,6 +838,12 @@ class ConchPromptLearner(nn.Module):
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def forward(self):
+        """
+        Build the complete prompts by combining prefix, learnable context,
+        and suffix tokens.
+        Return:
+            prompts: prompt embeddings for all classes.
+        """
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
@@ -727,6 +857,16 @@ class ConchPromptLearner(nn.Module):
 
 class HFPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the prompt learner for a Hugging Face CLIP-based model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Hugging Face CLIP-based model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.tokenizer = tokenizer
         n_cls = len(classnames)
@@ -819,6 +959,12 @@ class HFPromptLearner(nn.Module):
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def forward(self):
+        """
+        Build the complete prompts by combining prefix, learnable context,
+        and suffix tokens.
+        Return:
+            prompts: prompt embeddings for all classes.
+        """
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
@@ -845,6 +991,15 @@ class Adapter(nn.Module):
 
 class CustomCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
+        """
+        Initialize the KgCoOp model based on the original CLIP backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: CLIP backbone model.
+        Return:
+            None
+        """
         super().__init__()
         self.prompt_learner = PromptLearner(cfg, classnames, clip_model)
         self.tokenized_prompts = self.prompt_learner.tokenized_prompts
@@ -858,9 +1013,24 @@ class CustomCLIP(nn.Module):
         self.adapter = Adapter(vis_dim, 4)
 
     def encode_image(self, image):
+        """
+        Encode the input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            image_features: encoded image features.
+        """
         return self.image_encoder(image.type(self.dtype))
 
     def forward(self, image):
+        """
+        Compute classification logits and the knowledge-guided regularization score.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+            score: regularization score based on the similarity between updated and original text features.
+        """
         prompts = self.prompt_learner()
         image_features = self.image_encoder(image.type(self.dtype))
 
@@ -886,6 +1056,16 @@ class CustomCLIP(nn.Module):
 
 class CustomBiomedCLIP(nn.Module):
     def __init__(self, cfg, classnames, biomed_model, tokenizer):
+        """
+        Initialize the KgCoOp model based on BiomedCLIP.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            biomed_model: BiomedCLIP backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -925,10 +1105,24 @@ class CustomBiomedCLIP(nn.Module):
         self.register_buffer("ori_embedding", tf_old, persistent=False)
 
     def encode_image(self, image):
+        """
+        Encode the input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            image_features: encoded image features.
+        """
         dt = next(self.biomed.parameters()).dtype
         return self.biomed.encode_image(image.to(dtype=dt))
 
-    def encode_text_with_ctx(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def encode_text_with_ctx(self, input_ids):
+        """
+        Encode text while injecting the learnable context into the token embeddings.
+        Arg:
+            input_ids: tokenized text inputs.
+        Return:
+            tf: encoded text features.
+        """
         device = input_ids.device
         we = self.word_embeddings
 
@@ -953,6 +1147,14 @@ class CustomBiomedCLIP(nn.Module):
         return tf
 
     def forward(self, image):
+        """
+        Compute classification logits and the knowledge-guided regularization score.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+            score: regularization score based on the similarity between updated and original text features.
+        """
         device = image.device
         dt = next(self.biomed.parameters()).dtype
         image_features = self.biomed.encode_image(image.to(dtype=dt))
@@ -980,6 +1182,16 @@ class CustomBiomedCLIP(nn.Module):
 
 class CustomQuiltCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the KgCoOp model based on a Quilt/OpenCLIP backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Quilt/OpenCLIP backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.clip_model = clip_model
         self.prompt_learner = QuiltPromptLearner(cfg, classnames, clip_model, tokenizer)
@@ -999,10 +1211,24 @@ class CustomQuiltCLIP(nn.Module):
         )
 
     def encode_image(self, image):
+        """
+        Encode the input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            image_features: encoded image features.
+        """
         return self.image_encoder(image.to(dtype=self.dtype))
 
     def encode_text_with_ctx(self, tokenized_prompts):
-
+        """
+        Encode tokenized prompts while replacing the context token embeddings
+        with the learnable prompt vectors.
+        Arg:
+            tokenized_prompts: tokenized prompts.
+        Return:
+            text_features: encoded text features.
+        """
         te = _get_openclip_token_embedding(self.clip_model)
         ctx = self.prompt_learner.ctx
         if ctx.dim() == 2:
@@ -1029,6 +1255,14 @@ class CustomQuiltCLIP(nn.Module):
             h.remove()
 
     def forward(self, image):
+        """
+        Compute classification logits and the knowledge-guided regularization score.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+            score: regularization score based on the similarity between updated and original text features.
+        """
         device = image.device
         image_features = self.image_encoder(image.type(self.dtype))
 
@@ -1058,6 +1292,16 @@ class CustomQuiltCLIP(nn.Module):
 
 class CustomConchCLIP(nn.Module):
     def __init__(self, cfg, classnames, conch_model, tokenizer):
+        """
+        Initialize the KgCoOp model based on the Conch backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            conch_model: Conch backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.clip_model = conch_model
@@ -1104,9 +1348,24 @@ class CustomConchCLIP(nn.Module):
         self.register_buffer("ori_embedding", text_features, persistent=False)
 
     def encode_image(self, image):
+        """
+        Encode the input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            image_features: encoded image features.
+        """
         return self.image_encoder(image.to(dtype=self.dtype))
 
     def encode_text_with_ctx(self, tokenized_prompts):
+        """
+        Encode tokenized prompts while replacing the context token embeddings
+        with the learnable prompt vectors.
+        Arg:
+            tokenized_prompts: tokenized prompts.
+        Return:
+            text_features: encoded text features.
+        """
         te = _get_openclip_token_embedding(self.clip_model)
         ctx = self.prompt_learner.ctx
         if ctx.dim() == 2:
@@ -1132,6 +1391,14 @@ class CustomConchCLIP(nn.Module):
             h.remove()
 
     def forward(self, image):
+        """
+        Compute classification logits and the knowledge-guided regularization score.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+            score: regularization score based on the similarity between updated and original text features.
+        """
         device = image.device
         image_features = self.clip_model.encode_image(image.to(dtype=self.dtype))
 
@@ -1161,6 +1428,16 @@ class CustomConchCLIP(nn.Module):
 
 class CustomPubMedCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the KgCoOp model based on a Hugging Face CLIP-based model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Hugging Face CLIP-based backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -1199,6 +1476,14 @@ class CustomPubMedCLIP(nn.Module):
         self.register_buffer("ori_embedding", tf, persistent=False)
 
     def encode_text_with_ctx(self, tokenized_prompts):
+        """
+        Encode tokenized prompts while replacing the context token embeddings
+        with the learnable prompt vectors.
+        Arg:
+            tokenized_prompts: tokenized prompts.
+        Return:
+            text_features: encoded text features.
+        """
         device = next(self.clip_model.parameters()).device
         tokenized_prompts = tokenized_prompts.to(device)
         attention_mask = self.attention_mask.to(device)
@@ -1232,6 +1517,14 @@ class CustomPubMedCLIP(nn.Module):
         return tf
 
     def forward(self, image):
+        """
+        Compute classification logits and the knowledge-guided regularization score.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+            score: regularization score based on the similarity between updated and original text features.
+        """
         device = next(self.clip_model.parameters()).device
         image_features = self.clip_model.get_image_features(
             pixel_values=image.to(dtype=self.vision_dtype)
