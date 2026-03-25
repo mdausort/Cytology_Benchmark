@@ -108,7 +108,7 @@ They are designed to be easily adapted to new settings and can also be used with
 Example:
 
 ```bash
-bash scripts/example.sh
+bash scripts/launch_run.sh or scripts/main_ivlp.sh
 ```
 
 ## Supported methods
