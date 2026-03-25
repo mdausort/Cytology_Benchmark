@@ -29,7 +29,14 @@ FINISH_MARKERS = [
 ]
 
 
-def run_is_completed(log_dir: Path) -> bool:
+def run_is_completed(log_dir):
+    """
+    Check whether a previous run has completed successfully based on log markers.
+    Arg:
+        log_dir: directory containing log files.
+    Return:
+        completed: whether the run is considered completed.
+    """
     if not log_dir.exists():
         return False
 
@@ -69,6 +76,15 @@ class Tee:
 
 
 def setup_logging(cfg, shot, seed):
+    """
+    Set up logging to both console and file for the current run.
+    Arg:
+        cfg: configuration dictionary.
+        shot: number of shots used in the experiment.
+        seed: random seed.
+    Return:
+        None
+    """
     dataset = cfg["dataset"]
     trainer = "Tip-Adapter"
     backbone = cfg["backbone"].replace("/", "")
@@ -92,7 +108,11 @@ def setup_logging(cfg, shot, seed):
 
 
 def get_arguments():
-
+    """
+    Parse command-line arguments.
+    Return:
+        args: parsed command-line arguments.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config", dest="config", help="settings of Tip-Adapter in yaml format"
@@ -107,7 +127,15 @@ def get_arguments():
 
 
 def load_backbone_and_preprocess(cfg):
-
+    """
+    Load the selected backbone model together with its preprocessing pipeline.
+    Arg:
+        cfg: configuration dictionary.
+    Return:
+        model: loaded backbone model.
+        preprocess: preprocessing function or transform.
+        extra: dictionary containing tokenizer and backend metadata.
+    """
     backbone = cfg["backbone"]
 
     if backbone == "Biomedclip":
@@ -170,6 +198,15 @@ def load_backbone_and_preprocess(cfg):
 
 
 def clip_classifier(classnames, template, clip_model):
+    """
+    Build text classifier weights for the original CLIP model from prompt templates.
+    Arg:
+        classnames: list of class names.
+        template: list of prompt templates.
+        clip_model: CLIP backbone model.
+    Return:
+        clip_weights: normalized text classifier weights.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     with torch.no_grad():
@@ -192,6 +229,17 @@ def clip_classifier(classnames, template, clip_model):
 
 
 def biomedclip_classifier(classnames, templates, biomed_model, tokenizer, device=None):
+    """
+    Build text classifier weights for BiomedCLIP from prompt templates.
+    Arg:
+        classnames: list of class names.
+        templates: list of prompt templates.
+        biomed_model: BiomedCLIP model.
+        tokenizer: tokenizer associated with the model.
+        device: target device.
+    Return:
+        clip_weights: normalized text classifier weights.
+    """
     if device is None:
         device = next(biomed_model.parameters()).device
 
@@ -221,6 +269,17 @@ def biomedclip_classifier(classnames, templates, biomed_model, tokenizer, device
 
 
 def quilt_classifier(classnames, templates, quilt_model, tokenizer, device=None):
+    """
+    Build text classifier weights for a Quilt/OpenCLIP model from prompt templates.
+    Arg:
+        classnames: list of class names.
+        templates: list of prompt templates.
+        quilt_model: Quilt/OpenCLIP model.
+        tokenizer: tokenizer associated with the model.
+        device: target device.
+    Return:
+        clip_weights: normalized text classifier weights.
+    """
     if device is None:
         device = next(quilt_model.parameters()).device
 
@@ -248,6 +307,17 @@ def quilt_classifier(classnames, templates, quilt_model, tokenizer, device=None)
 
 
 def conch_classifier(classnames, templates, conch_model, tokenizer, device=None):
+    """
+    Build text classifier weights for the Conch model from prompt templates.
+    Arg:
+        classnames: list of class names.
+        templates: list of prompt templates.
+        conch_model: Conch model.
+        tokenizer: tokenizer associated with the model.
+        device: target device.
+    Return:
+        clip_weights: normalized text classifier weights.
+    """
     if device is None:
         device = next(conch_model.parameters()).device
 
@@ -295,6 +365,17 @@ def conch_classifier(classnames, templates, conch_model, tokenizer, device=None)
 
 
 def pubmedclip_classifier(classnames, templates, clip_model, tokenizer, device=None):
+    """
+    Build text classifier weights for a Hugging Face CLIP-based model from prompt templates.
+    Arg:
+        classnames: list of class names.
+        templates: list of prompt templates.
+        clip_model: Hugging Face CLIP-based model.
+        tokenizer: tokenizer associated with the model.
+        device: target device.
+    Return:
+        clip_weights: normalized text classifier weights.
+    """
     if device is None:
         device = next(clip_model.parameters()).device
 
@@ -329,6 +410,17 @@ def pubmedclip_classifier(classnames, templates, clip_model, tokenizer, device=N
 
 
 def build_cache_model(cfg, clip_model, train_loader_cache, shot):
+    """
+    Build or load the cache model for the original CLIP backbone.
+    Arg:
+        cfg: configuration dictionary.
+        clip_model: CLIP backbone model.
+        train_loader_cache: data loader used to build the cache.
+        shot: number of shots used in the experiment.
+    Return:
+        cache_keys: cached visual features.
+        cache_values: cached labels in one-hot format.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     cache_dir = cfg["cache_dir"]
@@ -370,7 +462,17 @@ def build_cache_model(cfg, clip_model, train_loader_cache, shot):
 
 
 def build_cache_biomed(cfg, biomed_model, train_loader_cache, shot):
-
+    """
+    Build or load the cache model for BiomedCLIP or OpenCLIP-like backbones.
+    Arg:
+        cfg: configuration dictionary.
+        biomed_model: backbone model used to encode images.
+        train_loader_cache: data loader used to build the cache.
+        shot: number of shots used in the experiment.
+    Return:
+        cache_keys: cached visual features.
+        cache_values: cached labels in one-hot format.
+    """
     cache_dir = cfg["cache_dir"]
     keys_path = f"{cache_dir}/keys_{shot}shots.pt"
     values_path = f"{cache_dir}/values_{shot}shots.pt"
@@ -421,7 +523,17 @@ def build_cache_biomed(cfg, biomed_model, train_loader_cache, shot):
 
 
 def build_cache_pubmedclip(cfg, clip_model, train_loader_cache, shot):
-
+    """
+    Build or load the cache model for a Hugging Face CLIP-based backbone.
+    Arg:
+        cfg: configuration dictionary.
+        clip_model: Hugging Face CLIP-based model.
+        train_loader_cache: data loader used to build the cache.
+        shot: number of shots used in the experiment.
+    Return:
+        cache_keys: cached visual features.
+        cache_values: cached labels in one-hot format.
+    """
     cache_dir = cfg["cache_dir"]
     keys_path = f"{cache_dir}/keys_{shot}shots.pt"
     values_path = f"{cache_dir}/values_{shot}shots.pt"
@@ -470,6 +582,17 @@ def build_cache_pubmedclip(cfg, clip_model, train_loader_cache, shot):
 
 
 def pre_load_features(cfg, split, clip_model, loader):
+    """
+    Precompute or load image features and labels for the original CLIP model.
+    Arg:
+        cfg: configuration dictionary.
+        split: dataset split name.
+        clip_model: CLIP backbone model.
+        loader: data loader for the split.
+    Return:
+        features: normalized image features.
+        labels: corresponding labels.
+    """    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if not cfg["load_pre_feat"]:
@@ -496,7 +619,17 @@ def pre_load_features(cfg, split, clip_model, loader):
 
 
 def pre_load_features_openclip(cfg, split, clip_model, loader):
-
+    """
+    Precompute or load image features and labels for OpenCLIP-like backbones.
+    Arg:
+        cfg: configuration dictionary.
+        split: dataset split name.
+        clip_model: OpenCLIP-like model.
+        loader: data loader for the split.
+    Return:
+        features: normalized image features.
+        labels: corresponding labels.
+    """
     f_path = os.path.join(cfg["cache_dir"], f"{split}_f.pt")
     l_path = os.path.join(cfg["cache_dir"], f"{split}_l.pt")
 
@@ -530,6 +663,13 @@ def pre_load_features_openclip(cfg, split, clip_model, loader):
 
 
 def _unwrap_pixel_values(images):
+    """
+    Extract pixel values from nested Hugging Face processor outputs.
+    Arg:
+        images: images or processor outputs.
+    Return:
+        pixel_values: tensor of pixel values.
+    """
     if torch.is_tensor(images):
         return images
 
@@ -566,6 +706,17 @@ def _unwrap_pixel_values(images):
 
 
 def pre_load_features_hfclip(cfg, split, clip_model, loader):
+    """
+    Precompute or load image features and labels for a Hugging Face CLIP-based model.
+    Arg:
+        cfg: configuration dictionary.
+        split: dataset split name.
+        clip_model: Hugging Face CLIP-based model.
+        loader: data loader for the split.
+    Return:
+        features: normalized image features.
+        labels: corresponding labels.
+    """
     f_path = os.path.join(cfg["cache_dir"], f"{split}_f.pt")
     l_path = os.path.join(cfg["cache_dir"], f"{split}_l.pt")
 
@@ -623,6 +774,15 @@ def pre_load_features_hfclip(cfg, split, clip_model, loader):
 
 
 def encode_image_any(model, images, kind):
+    """
+    Encode images using the appropriate image encoder interface for the selected backbone.
+    Arg:
+        model: backbone model.
+        images: input image batch.
+        kind: backbone family identifier.
+    Return:
+        image_features: encoded image features.
+    """
     device = next(model.parameters()).device
     images = images.to(device=device, non_blocking=True)
 
@@ -651,6 +811,21 @@ def run_tip_adapter(
     test_labels,
     clip_weights,
 ):
+    """
+    Evaluate Tip-Adapter by searching hyperparameters on the validation set
+    and testing the best configuration on the test set.
+    Arg:
+        cfg: configuration dictionary.
+        cache_keys: cached visual features.
+        cache_values: cached labels in one-hot format.
+        val_features: validation image features.
+        val_labels: validation labels.
+        test_features: test image features.
+        test_labels: test labels.
+        clip_weights: text classifier weights.
+    Return:
+        None
+    """
 
     print("\n-------- Searching hyperparameters on the val set. --------")
 
@@ -703,6 +878,24 @@ def run_tip_adapter_F(
     train_loader_F,
     extra,
 ):
+    """
+    Fine-tune the Tip-Adapter cache, perform validation with early stopping,
+    search hyperparameters, and evaluate the best adapter on the test set.
+    Arg:
+        cfg: configuration dictionary.
+        cache_keys: cached visual features.
+        cache_values: cached labels in one-hot format.
+        val_features: validation image features.
+        val_labels: validation labels.
+        test_features: test image features.
+        test_labels: test labels.
+        clip_weights: text classifier weights.
+        clip_model: backbone model.
+        train_loader_F: fine-tuning data loader.
+        extra: dictionary containing backend metadata.
+    Return:
+        None
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Enable the cached keys to be learnable
@@ -884,7 +1077,12 @@ def run_tip_adapter_F(
 
 
 def main():
-
+    """
+    Load the configuration, prepare the model and dataset, build the cache,
+    precompute features, and run Tip-Adapter and Tip-Adapter-F.
+    Return:
+        None
+    """
     # Load config file
     args = get_arguments()
     assert os.path.exists(args.config)
