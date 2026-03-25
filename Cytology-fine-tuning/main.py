@@ -2,14 +2,12 @@ import clip
 import torch
 import torch.nn as nn
 import open_clip
-from datasets import build_dataset  # type: ignore
+from datasets import build_dataset
 import torchvision.transforms as transforms
-from datasets.utils import build_data_loader  # type: ignore
-
-# from lora import run_uni, run_uni_lora, run_uni_lora_percent  # type: ignore
+from datasets.utils import build_data_loader
 from lora import run_lora_text, run_lora, run_lora_features_extractor
 from utils import setup_logging
-from run_utils import set_random_seed, get_arguments  # type: ignore
+from run_utils import set_random_seed, get_arguments
 from transformers import (
     CLIPModel,
     CLIPProcessor,
@@ -23,6 +21,15 @@ import conch.open_clip_custom
 
 
 def load_model_and_preprocess(model_name):
+    """
+    Load the selected model together with its preprocessing pipeline.
+    Arg:
+        model_name: name of the model to load.
+    Return:
+        model: loaded model.
+        preprocess: preprocessing function or transform associated with the model.
+        hf_processor: Hugging Face processor when required, otherwise None.
+    """
     hf_processor = None
 
     if model_name == "clip-b16":
@@ -144,6 +151,11 @@ def load_model_and_preprocess(model_name):
 
 
 def main():
+    """
+    Parse arguments, load the model, prepare the dataset and data loaders, and launch the selected training or feature extraction routine.
+    Return:
+        None
+    """
     args = get_arguments()
     set_random_seed(args.seed)
 

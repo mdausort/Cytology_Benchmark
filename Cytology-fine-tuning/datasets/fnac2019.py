@@ -32,7 +32,6 @@ class FNAC2019(DatasetBase):
         val = self.read_txt_split(os.path.join(self.splits_dir, SPLIT_FILES["val"]))
         test = self.read_txt_split(os.path.join(self.splits_dir, SPLIT_FILES["test"]))
 
-        # few-shot “simple” (comme ton EuroSAT simple)
         n_shots_val = 16
         val = self.generate_fewshot_dataset(val, num_shots=n_shots_val)
         train = self.generate_fewshot_dataset(train, num_shots=num_shots)

@@ -1,11 +1,11 @@
 import os 
 import json
 import torch
+import time
 import numpy as np
 import pandas as pd
 import torch.nn as nn
 import pytorch_warmup as warmup
-from typing import Any, Callable
 from utils import cls_acc, clip_classifier, get_function
 import torch.nn.functional as F
 from loralib.utils import (
@@ -17,13 +17,30 @@ from pathlib import Path
 import sys
 
 
-def count_params(model: nn.Module):
+def count_params(model):
+    """
+    Count the total number of parameters and the number of trainable parameters.
+    Arg:
+        model: model whose parameters are counted.
+    Return:
+        total: total number of parameters.
+        trainable: number of trainable parameters.
+    """
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total, trainable
 
 
-def count_lora_params(model: nn.Module):
+def count_lora_params(model):
+    """
+    Count the total number of LoRA parameters and the number of trainable LoRA parameters.
+    Arg:
+        model: model containing LoRA parameters.
+    Return:
+        total: total number of LoRA parameters.
+        trainable: number of trainable LoRA parameters.
+        lora_params: list of LoRA parameters.
+    """
     lora_params = list(get_lora_parameters(model))
     total = sum(p.numel() for p in lora_params)
     trainable = sum(p.numel() for p in lora_params if p.requires_grad)
@@ -31,8 +48,17 @@ def count_lora_params(model: nn.Module):
 
 
 def print_param_report(
-    model_backbone: nn.Module, head: nn.Module | None = None, prefix="[PARAMS]"
+    model_backbone, head, prefix="[PARAMS]"
 ):
+    """
+    Print a summary of the total, trainable, and LoRA parameters of the model.
+    Arg:
+        model_backbone: backbone model.
+        head: optional classification head.
+        prefix: prefix used in printed messages.
+    Return:
+        None
+    """
     tot, tr = count_params(model_backbone)
     print(
         f"{prefix} backbone total={tot:,} | trainable={tr:,} | trainable%={100 * tr / max(tot, 1):.6f}%"
@@ -50,6 +76,14 @@ def print_param_report(
 
 
 def print_param_report_lora_text(model_vlm, prefix="[PARAMS]"):
+    """
+    Print a summary of the total, trainable, and LoRA parameters of a vision-language model.
+    Arg:
+        model_vlm: vision-language model.
+        prefix: prefix used in printed messages.
+    Return:
+        None
+    """
     tot, tr = count_params(model_vlm)
     ltot, ltr, _ = count_lora_params(model_vlm)
     pct = 100.0 * tr / max(tot, 1)
@@ -61,258 +95,47 @@ def print_param_report_lora_text(model_vlm, prefix="[PARAMS]"):
 
 
 def get_logit_scale_from_model(model, default=1.0, exp_if_log=True):
-    # OpenCLIP/CLIP: model.logit_scale is often a Parameter in log-space
+    """
+    Retrieve the logit scale from the model.
+    Arg:
+        model: model that may contain a logit_scale attribute.
+        default: default value used if logit_scale is not found.
+        exp_if_log: whether to exponentiate the logit scale if it is stored in log space.
+    Return:
+        logit_scale: retrieved or default logit scale.
+    """
     if hasattr(model, "logit_scale"):
         ls = model.logit_scale
         if torch.is_tensor(ls):
-            # OpenCLIP stores logit_scale in log space; usually you want exp()
             return ls.exp() if exp_if_log else ls
         return torch.tensor(float(ls))
     return torch.tensor(float(default))
 
 
-def sanity_check_run_lora(
-    args,
-    backbone: nn.Module,  # ton model (CLIP/openclip/timm/ViT/HF)
-    model_vision: Callable,  # renvoyé par get_function(args, backbone)
-    head: nn.Module,  # model_linear
-    train_loader,
-    *,
-    n_steps=1,
-    verbose=True,
-):
-    device = torch.device("cuda")
-    backbone = backbone.to(device).train()
-    head = head.to(device).train()
-
-    # clear grads
-    for p in backbone.parameters():
-        p.grad = None
-    for p in head.parameters():
-        p.grad = None
-
-    it = iter(train_loader)
-    images, target, _ = next(it)
-
-    # images doit être Tensor
-    if not torch.is_tensor(images):
-        raise TypeError(
-            f"[SANITY run_lora] images is {type(images)} (expected torch.Tensor). "
-            "Ton tfm doit renvoyer un Tensor (3,H,W), pas dict/BatchFeature/list."
-        )
-
-    images = images.to(device, non_blocking=True)
-    target = target.to(device, non_blocking=True)
-
-    with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-        feats = model_vision(images)
-        feats = _to_tensor(feats)
-        feats = _pool_to_bd(feats)
-        logits = head(feats)
-        loss = F.cross_entropy(logits, target)
-
-    if (
-        logits.ndim != 2
-        or logits.size(0) != images.size(0)
-        or logits.size(1) != args.num_classes
-    ):
-        raise ValueError(
-            f"[SANITY run_lora] logits shape {tuple(logits.shape)} != (B,{args.num_classes})"
-        )
-
-    if not torch.isfinite(loss):
-        raise ValueError("[SANITY run_lora] loss is NaN/Inf")
-
-    loss.backward()
-
-    # grads LoRA
-    lora_params = list(get_lora_parameters(backbone))
-    if len(lora_params) == 0:
-        raise ValueError(
-            "[SANITY run_lora] No LoRA params found (apply_lora pas appliqué au bon module ?)"
-        )
-
-    n_lora_with_grad = sum(
-        (p.grad is not None)
-        and torch.isfinite(p.grad).all()
-        and (p.grad.abs().sum() > 0)
-        for p in lora_params
-    )
-    n_head_with_grad = sum(
-        (p.grad is not None)
-        and torch.isfinite(p.grad).all()
-        and (p.grad.abs().sum() > 0)
-        for p in head.parameters()
-    )
-
-    if verbose:
-        print("\n" + "=" * 90)
-        print("🔍 SANITY CHECK run_lora (image-only + head)")
-        print("=" * 90)
-        print("images:", tuple(images.shape), images.dtype, images.device)
-        print("logits:", tuple(logits.shape), logits.dtype, logits.device)
-        print("loss:", float(loss.item()))
-        print(
-            f"LoRA params: {len(lora_params)} | with nonzero grad: {n_lora_with_grad}"
-        )
-        print(
-            f"Head params: {sum(1 for _ in head.parameters())} | with nonzero grad: {n_head_with_grad}"
-        )
-
-    if n_head_with_grad == 0:
-        raise ValueError("[SANITY run_lora] No gradients on head (unexpected).")
-
-    # Pour run_lora, LoRA peut être sur vision; si apply_lora met LoRA ailleurs, ça peut être 0.
-    # On reste strict: on attend quand même des grads LoRA.
-    if n_lora_with_grad == 0:
-        raise ValueError(
-            "[SANITY run_lora] No gradients on LoRA params. Causes typiques:\n"
-            "- apply_lora appliqué sur un module différent de celui réellement utilisé par model_vision\n"
-            "- model_vision pointe vers une copie/closure avant injection LoRA\n"
-            "- forward est sous no_grad quelque part"
-        )
-
-    print("✅ SANITY run_lora PASSED\n")
-    return True
-
-
-def sanity_check_run_lora_text_v2(
-    args,
-    model_vlm,
-    logit_scale,
-    dataset,
-    train_loader,
-    *,
-    verbose=True,
-):
-    device = torch.device("cuda")
-    model_vlm = model_vlm.to(device)
-    model_vlm.train()
-
-    # IMPORTANT: récupérer functions APRÈS LoRA + to(device)
-    model_vision, model_text, model_tokenizer = get_function(args, model_vlm)
-
-    # logit_scale -> tensor
-    if torch.is_tensor(logit_scale):
-        ls = logit_scale.to(device=device, dtype=torch.float32)
-    else:
-        ls = torch.tensor(float(logit_scale), device=device, dtype=torch.float32)
-
-    template = dataset.template[0]
-    texts = [template.format(c.replace("_", " ")) for c in dataset.classnames]
-    C = len(texts)
-
-    # tokens une fois
-    try:
-        tok = model_tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
-    except TypeError:
-        tok = model_tokenizer(texts)
-
-    # move tok to cuda (BatchEncoding/dict/tensor)
-    if hasattr(tok, "to"):
-        tok = tok.to(device)
-    elif torch.is_tensor(tok):
-        tok = tok.to(device)
-    elif isinstance(tok, dict):
-        tok = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in tok.items()}
-
-    # un batch
-    it = iter(train_loader)
-    batch = next(it)
-    images, target, _ = unpack_batch(batch)
-
-    images = images.to(device, non_blocking=True)
-    target = target.to(device, non_blocking=True)
-    B = images.size(0)
-
-    # clear grads
-    for p in model_vlm.parameters():
-        p.grad = None
-
-    need_text_grad = args.encoder in ["text", "both"]
-    need_vision_grad = args.encoder in ["vision", "both"]
-
-    # text feats
-    if need_text_grad:
-        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-            class_emb = model_text(tok)
-            text_features = class_emb / class_emb.norm(dim=-1, keepdim=True)
-    else:
-        with torch.no_grad():
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                class_emb = model_text(tok)
-                text_features = class_emb / class_emb.norm(dim=-1, keepdim=True)
-
-    # image feats
-    if need_vision_grad:
-        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-            image_features = model_vision(images)
-    else:
-        with torch.no_grad():
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                image_features = model_vision(images)
-
-    image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-
-    # align dtype/device
-    text_features = text_features.to(
-        dtype=image_features.dtype, device=image_features.device
-    )
-    ls_ = ls.to(dtype=image_features.dtype, device=image_features.device)
-
-    logits = ls_ * (image_features @ text_features.t())
-    assert logits.shape == (B, C), f"logits shape {tuple(logits.shape)} != {(B, C)}"
-    loss = F.cross_entropy(logits, target)
-    assert torch.isfinite(loss).all(), "loss is NaN/Inf"
-
-    loss.backward()
-
-    # check grads on LoRA params
-    ltot, ltr, lora_params = count_lora_params(model_vlm)
-    n_with = 0
-    max_abs = 0.0
-    for p in lora_params:
-        if p.grad is None:
-            continue
-        n_with += 1
-        max_abs = max(max_abs, float(p.grad.detach().abs().max().item()))
-
-    if verbose:
-        print("\n" + "=" * 90)
-        print("🔍 SANITY CHECK LoRA-TEXT (v2)")
-        print("=" * 90)
-        print("encoder:", args.encoder)
-        print("batch:", tuple(images.shape), "targets:", tuple(target.shape))
-        print("logits:", tuple(logits.shape), "loss:", float(loss.item()))
-        print(
-            f"LoRA params tensors: {len(lora_params)} | with_grad: {n_with} | max|grad|={max_abs:.3e}"
-        )
-        print("=" * 90 + "\n")
-
-    if len(lora_params) == 0:
-        raise RuntimeError(
-            "LoRA params list is empty -> apply_lora() didn’t modify the model used in forward."
-        )
-    if n_with == 0 or max_abs == 0.0:
-        raise RuntimeError(
-            "No non-zero grad on LoRA params. Causes typiques: "
-            "get_function pointe vers mauvais sous-module, "
-            "encoder mode met tout en no_grad, "
-            "ou LoRA appliqué à un autre objet que celui utilisé dans le forward."
-        )
-
-    return True
-
-
-def setup_logging_to_file(log_path: Path):
+def setup_logging_to_file(log_path):
+    """
+    Retrieve the logit scale from the model.
+    Arg:
+        model: model that may contain a logit_scale attribute.
+        default: default value used if logit_scale is not found.
+        exp_if_log: whether to exponentiate the logit scale if it is stored in log space.
+    Return:
+        logit_scale: retrieved or default logit scale.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    f = open(log_path, "a", buffering=1)  # line-buffered
+    f = open(log_path, "a", buffering=1)
     sys.stdout = f
     sys.stderr = f
 
 
-def get_run_dir(args) -> Path:
-    # 1) priorité à output_dir si fourni
+def get_run_dir(args):
+    """
+    Get the directory used to store logs, predictions, and results.
+    Arg:
+        args: argument object containing output paths.
+    Return:
+        run_dir: directory used for the current run.
+    """
     out = getattr(args, "log_path", None)
     if out:
         run_dir = Path(out)
@@ -323,7 +146,13 @@ def get_run_dir(args) -> Path:
 
 
 def _device_of_callable(fn):
-    # fn can be nn.Module or bound method (model.encode_text)
+    """
+    Infer the device associated with a callable module or method.
+    Arg:
+        fn: callable object or bound method.
+    Return:
+        device: inferred device.
+    """
     if hasattr(fn, "parameters"):
         try:
             return next(fn.parameters()).device
@@ -339,6 +168,14 @@ def _device_of_callable(fn):
 
 
 def _move_tokens(tokens, device):
+    """
+    Move tokenized inputs to the target device.
+    Arg:
+        tokens: tokenized inputs.
+        device: target device.
+    Return:
+        tokens: tokenized inputs moved to the target device.
+    """
     if hasattr(tokens, "to"):
         return tokens.to(device)
     if torch.is_tensor(tokens):
@@ -350,18 +187,22 @@ def _move_tokens(tokens, device):
     raise TypeError(f"Unsupported token type: {type(tokens)}")
 
 
-def _to_tensor(x: Any) -> torch.Tensor:
-    """Try to extract a tensor from common container outputs."""
+def _to_tensor(x):
+    """
+    Extract a tensor from different possible output formats.
+    Arg:
+        x: model output that may contain a tensor.
+    Return:
+        tensor: extracted tensor.
+    """
     if torch.is_tensor(x):
         return x
     if isinstance(x, (list, tuple)) and len(x) > 0:
-        # often (features, ...) or (last_hidden_state, pooled, ...)
         for e in x:
             if torch.is_tensor(e):
                 return e
         return _to_tensor(x[0])
     if isinstance(x, dict):
-        # common keys
         for k in [
             "image_embeds",
             "text_embeds",
@@ -371,33 +212,39 @@ def _to_tensor(x: Any) -> torch.Tensor:
         ]:
             if k in x and torch.is_tensor(x[k]):
                 return x[k]
-        # fallback: first tensor value
         for v in x.values():
             if torch.is_tensor(v):
                 return v
     raise TypeError(f"Could not extract tensor from output type={type(x)}")
 
 
-def _pool_to_bd(x: torch.Tensor) -> torch.Tensor:
+def _pool_to_bd(x):
     """
-    Convert possible shapes to [B, D]:
-      - [B, D] -> OK
-      - [B, T, D] -> take CLS token if plausible else mean pool over T
-      - [B, C, H, W] -> global average pool -> [B, C]
+    Convert feature tensors to a two-dimensional batch-feature representation.
+    Arg:
+        x: input feature tensor.
+    Return:
+        x: pooled feature tensor of shape [batch_size, dim].
     """
     if x.ndim == 2:
         return x
     if x.ndim == 3:
-        # Heuristic: token 0 is CLS for many ViTs
-        # If T looks like tokens, pick CLS; otherwise mean pool.
-        # Safer: take token 0 by default.
         return x[:, 0, :]
     if x.ndim == 4:
         return x.mean(dim=(-2, -1))
     raise ValueError(f"Unsupported feature tensor shape: {tuple(x.shape)}")
 
 
-def infer_feature_dim(encode_image: Callable, loader, device=None) -> int:
+def infer_feature_dim(encode_image, loader, device=None):
+    """
+    Infer the feature dimension produced by an image encoder from one batch.
+    Arg:
+        encode_image: image encoding function.
+        loader: data loader providing image batches.
+        device: device used for inference.
+    Return:
+        dim: inferred feature dimension.
+    """
     device = device or torch.device("cuda")
     for batch in loader:
         images, _, _ = unpack_batch(batch)
@@ -411,14 +258,21 @@ def infer_feature_dim(encode_image: Callable, loader, device=None) -> int:
 
 
 def unpack_batch(batch):
-    # dict (Dassl)
+    """
+    Unpack a batch into images, labels, and paths.
+    Arg:
+        batch: batch returned by a data loader.
+    Return:
+        images: input images.
+        target: target labels.
+        path: image paths if available, otherwise None.
+    """
     if isinstance(batch, dict):
         images = batch["img"]
         target = batch["label"]
         path = batch.get("impath", batch.get("path", None))
         return images, target, path
 
-    # tuple/list
     if isinstance(batch, (list, tuple)):
         if len(batch) == 2:
             images, target = batch
@@ -431,23 +285,47 @@ def unpack_batch(batch):
 
 
 class ImageEncoderWithHead(nn.Module):
+    """
+    Wrapper combining an image encoder and a classification head.
+    """
     def __init__(
-        self, encode_image: Callable[[torch.Tensor], torch.Tensor], head: nn.Module
+        self, encode_image, head
     ):
+        """
+        Initialize a wrapper combining an image encoder and a classification head.
+        Arg:
+            encode_image: image encoding function.
+            head: classification head.
+        Return:
+            None
+        """
         super().__init__()
-        # encode_image is a python callable closing over the backbone modules
         self.encode_image = encode_image
         self.head = head
 
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
+    def forward(self, images):
+        """
+        Encode images into features and apply the classification head.
+        Arg:
+            images: input image batch.
+        Return:
+            logits: classification logits.
+        """
         feats = self.encode_image(images)
         feats = _to_tensor(feats)
         feats = _pool_to_bd(feats)
         return self.head(feats)
 
 
-def evaluate_lora(args, model, loader):
-
+def evaluate_lora(model, loader):
+    """
+    Evaluate a model on a data loader and compute the classification accuracy.
+    Arg:
+        model: model to evaluate.
+        loader: evaluation data loader.
+    Return:
+        acc: classification accuracy.
+    """
     model.eval()
 
     acc = 0.0
@@ -471,9 +349,18 @@ def evaluate_lora(args, model, loader):
 
 
 @torch.no_grad()
-def evaluate_lora_dump(args, model, loader, out_csv: str | Path, model_tag: str):
-    import time
-
+def evaluate_lora_dump(model, loader, out_csv, model_tag):
+    """
+    Evaluate a model, save predictions to a CSV file, and compute inference speed statistics.
+    Arg:
+        model: model to evaluate.
+        loader: evaluation data loader.
+        out_csv: output CSV file path.
+        model_tag: tag identifying the evaluated model.
+    Return:
+        acc: classification accuracy.
+        df: dataframe containing predictions and probabilities.
+    """
     model.eval()
     rows = []
 
@@ -483,7 +370,6 @@ def evaluate_lora_dump(args, model, loader, out_csv: str | Path, model_tag: str)
     warmup_batches = 5
 
     for batch_idx, batch in enumerate(loader):
-        # support (images, target) ou (images, target, path, patient_id) ou dict
         if isinstance(batch, dict):
             images = batch["img"]
             target = batch["label"]
@@ -535,7 +421,6 @@ def evaluate_lora_dump(args, model, loader, out_csv: str | Path, model_tag: str)
                 "correct": int((pred[i] == target[i]).item()),
             }
 
-            # ajouter les probabilités de chaque classe
             for c in range(probs.size(1)):
                 row[f"prob_{c}"] = float(probs[i, c].item())
 
@@ -566,7 +451,16 @@ def evaluate_lora_dump(args, model, loader, out_csv: str | Path, model_tag: str)
 
 
 def evaluate_lora_text(args, model, loader, dataset):
-
+    """
+    Evaluate a vision-language model using text prompts derived from the dataset classes.
+    Arg:
+        args: argument object.
+        model: vision-language model to evaluate.
+        loader: evaluation data loader.
+        dataset: dataset containing class names and templates.
+    Return:
+        acc: classification accuracy.
+    """
     model_vision, model_text, model_tokenizer = get_function(args, model)
 
     model.eval()
@@ -580,7 +474,6 @@ def evaluate_lora_text(args, model, loader, dataset):
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
             tok = model_tokenizer(texts)
 
-            # BatchEncoding / dict / tensor -> move to cuda
             if hasattr(tok, "to"):
                 tok = tok.to("cuda")
             elif torch.is_tensor(tok):
@@ -617,12 +510,23 @@ def evaluate_lora_text(args, model, loader, dataset):
 def evaluate_lora_text_dump(
     args, model, loader, dataset, out_csv, model_tag, logit_scale=None
 ):
-    import time
-
+    """
+    Evaluate a vision-language model, save predictions to a CSV file, and compute inference speed statistics.
+    Arg:
+        args: argument object.
+        model: vision-language model to evaluate.
+        loader: evaluation data loader.
+        dataset: dataset containing class names and templates.
+        out_csv: output CSV file path.
+        model_tag: tag identifying the evaluated model.
+        logit_scale: optional logit scale used to compute logits.
+    Return:
+        acc: classification accuracy.
+        df: dataframe containing predictions and probabilities.
+    """
     model_vision, model_text, model_tokenizer = get_function(args, model)
     model.eval()
 
-    # --- text features ---
     template = dataset.template[0]
     texts = [template.format(c.replace("_", " ")) for c in dataset.classnames]
 
@@ -638,7 +542,6 @@ def evaluate_lora_text_dump(
     class_embeddings = class_embeddings.float()
     text_features = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
 
-    # --- pick logit_scale ---
     if logit_scale is None:
         if hasattr(model, "logit_scale") and torch.is_tensor(model.logit_scale):
             logit_scale = model.logit_scale.exp()
@@ -650,7 +553,6 @@ def evaluate_lora_text_dump(
 
     rows = []
 
-    # --- inference timing ---
     total_inference_time = 0.0
     total_num_images = 0
     total_num_batches = 0
@@ -736,7 +638,6 @@ def evaluate_lora_text_dump(
     df.to_csv(out_csv, index=False)
     acc = df["correct"].mean() * 100.0 if len(df) else 0.0
 
-    # --- print inference speed ---
     if total_num_batches > 0 and total_num_images > 0:
         avg_time_per_batch = total_inference_time / total_num_batches
         avg_time_per_image = total_inference_time / total_num_images
@@ -753,7 +654,17 @@ def evaluate_lora_text_dump(
 
 
 def run_lora(args, model, train_loader, val_loader, test_loader):
-
+    """
+    Train a LoRA-based image classifier, perform validation with early stopping, evaluate on the test set, and save predictions and results.
+    Arg:
+        args: argument object.
+        model: backbone model.
+        train_loader: training data loader.
+        val_loader: validation data loader.
+        test_loader: test data loader.
+    Return:
+        None
+    """
     device = torch.device("cuda")
     run_dir = get_run_dir(args)
 
@@ -770,7 +681,6 @@ def run_lora(args, model, train_loader, val_loader, test_loader):
     apply_lora(args, model)
     model = model.to(device)
 
-    # IMPORTANT: after apply_lora
     model_vision, _, _ = get_function(args, model)
 
     num_features = infer_feature_dim(model_vision, train_loader, device=device)
@@ -861,7 +771,7 @@ def run_lora(args, model, train_loader, val_loader, test_loader):
         # -------------------------- Validation + Early stopping --------------------------
         if VALIDATION:
             _model.eval()
-            acc_val = evaluate_lora(args, _model, val_loader)
+            acc_val = evaluate_lora(_model, val_loader)
             print(f"**** Val accuracy: {acc_val:.2f}. ****")
 
             is_best = acc_val > best_val_acc
@@ -897,7 +807,6 @@ def run_lora(args, model, train_loader, val_loader, test_loader):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-            # Warmup phase for early stopping
             if epoch <= 10:
                 print(
                     f"Early-stopping warmup epoch {epoch}/{10} "
@@ -939,7 +848,7 @@ def run_lora(args, model, train_loader, val_loader, test_loader):
     # -------------------------- Final test --------------------------
     pred_csv = run_dir / "predictions_test.csv"
     acc_test, _df = evaluate_lora_dump(
-        args, _model, test_loader, pred_csv, model_tag="lora"
+        _model, test_loader, pred_csv, model_tag="lora"
     )
     print("**** Final test accuracy: {:.2f}. ****\n".format(acc_test))
 
@@ -969,15 +878,24 @@ def run_lora(args, model, train_loader, val_loader, test_loader):
 
 @torch.no_grad()
 def zeroshot_acc_stream(args, model_vlm, loader, textual_features, logit_scale):
+    """
+    Compute zero-shot accuracy of a vision-language model on a data loader.
+    Arg:
+        args: argument object.
+        model_vlm: vision-language model.
+        loader: evaluation data loader.
+        textual_features: normalized text features used as classifier weights.
+        logit_scale: scaling factor applied to the logits.
+    Return:
+        acc: zero-shot classification accuracy.
+    """
     vision, _, _ = get_function(args, model_vlm)
 
-    # vision peut être module ou bound-method
     dev = _device_of_callable(vision)
 
     tot = 0
     acc = 0.0
 
-    # textual_features: [D, C] (comme ton clip_classifier)
     tf = textual_features.to(
         device=dev,
         dtype=torch.float16 if dev.type == "cuda" else torch.float32,
@@ -999,7 +917,7 @@ def zeroshot_acc_stream(args, model_vlm, loader, textual_features, logit_scale):
             img = vision(images)
             img = img / img.norm(dim=-1, keepdim=True)
 
-            logits = ls * (img @ tf)  # [B,C]
+            logits = ls * (img @ tf)
 
         acc += cls_acc(logits.float(), target) * target.size(0)
         tot += target.size(0)
@@ -1010,12 +928,18 @@ def zeroshot_acc_stream(args, model_vlm, loader, textual_features, logit_scale):
 def run_lora_text(
     args, model_vlm, dataset, train_loader, val_loader, test_loader
 ):
-    import json
-    import numpy as np
-    import torch
-    import torch.nn.functional as F
-    from pathlib import Path
-
+    """
+    Train LoRA parameters on a vision-language model, evaluate the zero-shot baseline, perform validation with early stopping, evaluate on the test set, and save predictions and results.
+    Arg:
+        args: argument object.
+        model_vlm: vision-language model.
+        dataset: dataset containing class names and templates.
+        train_loader: training data loader.
+        val_loader: validation data loader.
+        test_loader: test data loader.
+    Return:
+        None
+    """
     run_dir = get_run_dir(args)
 
     log_dir = Path(args.log_path) if getattr(args, "log_path", None) else run_dir
@@ -1214,7 +1138,6 @@ def run_lora_text(
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-            # Warmup phase for early stopping
             if epoch <= 10:
                 print(
                     f"Early-stopping warmup epoch {epoch}/{10} "
@@ -1292,7 +1215,17 @@ def run_lora_text(
 
 
 def run_lora_features_extractor(args, model, train_loader, val_loader, test_loader):
-
+    """
+    Train a linear classification head on top of frozen image features, perform validation with early stopping, evaluate on the test set, and save predictions and results.
+    Arg:
+        args: argument object.
+        model: backbone model used as feature extractor.
+        train_loader: training data loader.
+        val_loader: validation data loader.
+        test_loader: test data loader.
+    Return:
+        None
+    """
     device = torch.device("cuda")
     run_dir = get_run_dir(args)
 
@@ -1306,7 +1239,6 @@ def run_lora_features_extractor(args, model, train_loader, val_loader, test_load
     # -------------------------- Define model --------------------------
     model = model.to(device)
 
-    # IMPORTANT: after apply_lora
     model_vision, _, _ = get_function(args, model)
 
     num_features = infer_feature_dim(model_vision, train_loader, device=device)
@@ -1337,7 +1269,7 @@ def run_lora_features_extractor(args, model, train_loader, val_loader, test_load
         optimizer, total_iters, eta_min=1e-6
     )
 
-    # -------------------------- training LoRA --------------------------
+    # -------------------------- Training LoRA --------------------------
     scaler = torch.amp.GradScaler("cuda")
     count_iters = 0
     VALIDATION = True
@@ -1430,7 +1362,6 @@ def run_lora_features_extractor(args, model, train_loader, val_loader, test_load
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-            # Warmup phase for early stopping
             if epoch <= 10:
                 print(
                     f"Early-stopping warmup epoch {epoch}/{10} "

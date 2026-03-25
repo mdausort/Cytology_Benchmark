@@ -3,7 +3,6 @@ import os
 from .utils import Datum, DatasetBase, read_json
 
 
-# template = ["a centered satellite photo of {}."]
 template = ["a photo of a {}."]
 
 

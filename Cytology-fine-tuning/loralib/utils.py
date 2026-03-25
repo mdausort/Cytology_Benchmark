@@ -178,7 +178,7 @@ def apply_lora(args, clip_model):
 
         elif args.model_name == "biomedclip":
             indices = INDEX_POSITIONS_TEXT[args.position]
-            bert = clip_model.text.transformer  # BertModel
+            bert = clip_model.text.transformer
 
             for i, layer in enumerate(bert.encoder.layer):
                 if i in indices:
@@ -334,13 +334,12 @@ def apply_lora(args, clip_model):
             "uni",
         ]:
             indices = INDEX_POSITIONS_VISION[args.backbone][args.position]
-            vision_encoder = clip_model  # DinoVisionTransformer
+            vision_encoder = clip_model
 
             for i, block in enumerate(vision_encoder.blocks):
                 if i in indices:
-                    attn = block.attn  # MemEffAttention
+                    attn = block.attn
 
-                    # LoRA sur QKV (fusionné)
                     if any(x in args.params for x in ["q", "k", "v"]):
                         attn.qkv = LinearLoRA(
                             attn.qkv,
@@ -350,7 +349,6 @@ def apply_lora(args, clip_model):
                         )
                         list_lora_layers.append(attn.qkv)
 
-                    # LoRA sur O (output projection)
                     if any(x in args.params for x in ["o", "out", "out_proj", "proj"]):
                         attn.proj = LinearLoRA(
                             attn.proj,
@@ -476,7 +474,6 @@ def save_lora(args, list_lora_layers):
 
     save_data = {"weights": weights, "metadata": metadata}
 
-    # to manage names like ViT-B/16
     backbone = args.backbone.replace("/", "").replace("-", "").lower()
     save_dir = (
         f"{args.save_path}/{backbone}/{args.dataset}/{args.shots}shots/seed{args.seed}"
@@ -489,7 +486,6 @@ def save_lora(args, list_lora_layers):
 
 
 def load_lora(args, list_lora_layers):
-    # to manage names like ViT-B/16
     backbone = args.backbone.replace("/", "").replace("-", "").lower()
     load_path = f"{args.save_path}/{backbone}/{args.dataset}/{args.shots}shots/seed{args.seed}/{args.filename}.pt"
 
