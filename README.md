@@ -1,40 +1,82 @@
-# A Comprehensive Benchmark of Foundation Models Fine-Tuning for Cytological Image Classification
+# A comprehensive benchmark for adapting foundation models to cytological image classification under few-shot settings.
 
-**Currently being updated**
+📄 Paper: [Submitted to JMI]
 
-## Contents 
+## Overview
 
-- [Installation](#installation)
-- [Usage](#usage)
-- [Contact](#contact)
+This repository accompanies our work on benchmarking foundation models for cytological image classification in low-data regimes.
 
-## Installation 
+Cytology datasets are typically small and require expert annotations, making them ideal candidates for few-shot learning approaches. In this project, we evaluate multiple foundation models and parameter-efficient fine-tuning (PEFT) strategies across a diverse set of cytology datasets.
 
-📌 **NB:** The Python version used is 3.9.13.
+We compare:
+- Vision Transformers (ViTs) and Vision-Language Models (VLMs)
+- Different pretraining domains (natural, biomedical, histopathology)
+- Several PEFT methods (LoRA, VPT, prompt learning, adapters)
 
-1. Create a virtual environment
-   This code is built on top of the awesome toolbox [Dassl.pytorch](https://github.com/KaiyangZhou/Dassl.pytorch) so you need to install the dassl environment first. Simply follow the instructions described here to install dassl as well as PyTorch.
+All experiments are conducted in a few-shot setting (1 to 16 samples per class).
 
-2. Activate the environment
-   ```bash
-   source /env/dassl/bin/activate
-   ```
+## Key findings
 
-3. Clone the GitHub repository
-   ```bash
-   pip3 install torch==2.2.2 torchaudio==2.2.2 torchvision==0.17.2
-   git clone https://github.com/mdausort/Cytology_Benchmark.git
-   ```
-   After that, run pip install -r requirements.txt under CoOp/ to install a few more packages required by CLIP.
-  
-4. Install the required packages
-   ```bash
-   cd Cytology-fine-tuning
-   pip3 install -r requirements.txt
-   ```
+- LoRA consistently outperforms other PEFT methods for adapting foundation models
+- Larger backbones improve performance, especially in extreme low-shot regimes
+- Histopathology-pretrained models perform better in low-shot settings
+- General-purpose models (e.g., CLIP) become competitive as more data is available
+- Simple ensembling improves robustness and accuracy
 
+## Repository structure
 
-3. Datasets downloads:
+This repository integrates several existing frameworks, adapted to support new backbones and cytology datasets.
+
+- `CoOp/`
+- `KgCoOp/`
+- `TaskRes/`
+- `Tip-Adapter/`
+- `Prompt-align/`
+- `multimodal-prompt-learning/`
+- `Cytology-fine-tuning/`
+
+Each submodule originates from a different repository and has been adapted for:
+- additional foundation models
+- unified dataset handling
+- consistent few-shot evaluation protocols
+
+| Github                     | 🔗 Link                                                                           |
+| -------------------------- | --------------------------------------------------------------------------------- |
+| CoOp                       | [📥 Link](https://github.com/kaiyangzhou/coop)                                    |
+| KgCoOp                     | [📥 Link](https://github.com/htyao89/KgCoOp)                                      |
+| TaskRes                    | [📥 Link](https://github.com/geekyutao/TaskRes)                                   |
+| Tip-Adapter                | [📥 Link](https://github.com/gaopengcuhk/Tip-Adapter)                             |
+| Prompt-align               | [📥 Link](https://github.com/BeierZhu/Prompt-align)                               |
+| multimodal-prompt-learning | [📥 Link](https://github.com/muzairkhattak/multimodal-prompt-learning)            |
+| Cytology-fine-tuning       | [📥 Link](https://github.com/mdausort/Cytology-fine-tuning)                       |
+
+## Environments
+Two Python environments are used:
+
+### 1. dassl
+Base environment for most experiments.
+
+### 2. dassl_prograd
+Extended version including additional prompt-learning methods (e.g., ProGrad).
+
+Both environments have been modified and require the provided `requirements.txt`.
+
+We recommend using conda:
+
+```bash
+conda create -n cytology python=3.10
+conda activate cytology
+pip install -r requirements.txt
+```
+
+## Datasets
+
+We evaluate on 10 public cytological datasets covering multiple organs and classification tasks.
+
+See `DATASETS.md` for:
+- download links
+- preprocessing details
+- dataset structure
 
 | Dataset        | 🔗 Download Link                                                                                        |
 | -------------- | -------------------------------------------------------------------------------------------------------- |
@@ -48,3 +90,38 @@
 | HiCervix       | [📥 Link](https://zenodo.org/records/11087263)                                                          |
 | MLCC           | [📥 Link](https://www.kaggle.com/datasets/blank1508/mendeley-lbc-cervical-cancer-)                      |
 | SIPaKMeD       | [📥 Link](https://www.kaggle.com/datasets/prahladmehandiratta/cervical-cancer-largest-dataset-sipakmed) |
+
+## Running experiments
+
+Experiments are launched through bash scripts.
+
+These scripts define the full experimental configuration, including:
+- dataset
+- model / backbone
+- number of shots
+- seed
+- training hyperparameters
+- output paths
+
+They are designed to be easily adapted to new settings and can also be used with Slurm array jobs for large-scale runs.
+
+Example:
+
+```bash
+bash scripts/example.sh
+```
+
+## Supported methods
+
+- Linear probing
+- LoRA (Low Rank Adaptation)
+- CoOp / CoCoOp / KgCoOp / ProGrad
+- Tip-Adapter / TaskRes
+- VPT (Visual Prompt Tuning)
+- IVLP (Independant Visual Language Prompting)
+
+All methods are adapted to work with multiple backbones as BiomedCLIP, PLIP, PubMedCLIP, QUILT and CONCH for VLM or DinoBLOOM and UNI for ViT.
+
+## Contact 
+
+If you have any questions, you can contact us by email: [manon.dausort@uclouvain.be](mailto\:manon.dausort@uclouvain.be)
