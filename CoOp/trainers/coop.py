@@ -19,7 +19,7 @@ import conch.open_clip_custom
 _tokenizer = _Tokenizer()
 
 
-def count_params(model: nn.Module):
+def count_params(model):
     """
     Count the total number of parameters and the number of trainable parameters.
     Arg:
@@ -33,7 +33,7 @@ def count_params(model: nn.Module):
     return total, trainable
 
 
-def count_params_by_module(model: nn.Module, key="prompt_learner"):
+def count_params_by_module(model, key="prompt_learner"):
     """
     Count the total number of parameters and trainable parameters for a specific submodule.
     Arg:
@@ -51,7 +51,7 @@ def count_params_by_module(model: nn.Module, key="prompt_learner"):
     return total, trainable
 
 
-def _vision_dtype_from_module(vision: torch.nn.Module) -> torch.dtype:
+def _vision_dtype_from_module(vision):
     """
     Retrieve the dtype used by the vision encoder.
     Arg:
@@ -828,7 +828,7 @@ class CustomBiomedCLIP(nn.Module):
         self.tokenized_prompts = self.prompt_learner.tokenized_prompts
         self.logit_scale = getattr(self.biomed, "logit_scale", None)
 
-    def encode_text_with_ctx(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def encode_text_with_ctx(self, input_ids):
         """
         Encode text while injecting the learnable context into the token embeddings.
         Arg:

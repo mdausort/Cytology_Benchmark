@@ -34,7 +34,7 @@ CUSTOM_TEMPLATES = {
 }
 
 
-def count_params(model: nn.Module):
+def count_params(model):
     """
     Count the total number of parameters and the number of trainable parameters.
     Arg:
@@ -48,7 +48,7 @@ def count_params(model: nn.Module):
     return total, trainable
 
 
-def count_params_by_module(model: nn.Module, key="prompt_learner"):
+def count_params_by_module(model, key="prompt_learner"):
     """
     Count the total number of parameters and trainable parameters for a specific submodule.
     Arg:

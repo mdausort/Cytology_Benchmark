@@ -20,7 +20,7 @@ import conch.open_clip_custom
 _tokenizer = _Tokenizer()
 
 
-def count_params(model: nn.Module):
+def count_params(model):
     """
     Count the total number of parameters and the number of trainable parameters.
     Arg:
@@ -34,7 +34,7 @@ def count_params(model: nn.Module):
     return total, trainable
 
 
-def count_params_by_module(model: nn.Module, key="prompt_learner"):
+def count_params_by_module(model, key="prompt_learner"):
     """
     Count the total number of parameters and trainable parameters for a specific submodule.
     Arg:
@@ -53,7 +53,7 @@ def count_params_by_module(model: nn.Module, key="prompt_learner"):
 
 
 @torch.no_grad()
-def infer_vis_dim_from_encode_image(biomed_model: nn.Module, image_size: int = 224) -> int:
+def infer_vis_dim_from_encode_image(biomed_model, image_size=224):
     """
     Infer the visual feature dimension by running the image encoder on a dummy input.
     Arg:
@@ -1045,7 +1045,7 @@ class CustomBiomedCLIP(nn.Module):
         self.tokenized_prompts = self.prompt_learner.tokenized_prompts
         self.logit_scale = getattr(self.biomed, "logit_scale", None)
 
-    def encode_text_with_ctx(self, input_ids: torch.Tensor, ctx_for_classes: torch.Tensor):
+    def encode_text_with_ctx(self, input_ids, ctx_for_classes):
         """
         Encode text features while injecting class-specific context embeddings.
         Arg:
