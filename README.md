@@ -93,16 +93,22 @@ See `DATASETS.md` for:
 
 ## Running experiments
 
-Each framework can be run independently.
+Experiments are launched through bash scripts.
 
-Example (LoRA fine-tuning):
+These scripts define the full experimental configuration, including:
+- dataset
+- model / backbone
+- number of shots
+- seed
+- training hyperparameters
+- output paths
+
+They are designed to be easily adapted to new settings and can also be used with Slurm array jobs for large-scale runs.
+
+Example:
 
 ```bash
-python train.py \
-  --dataset BCFC \
-  --shots 16 \
-  --backbone clip_vit_b16 \
-  --method lora
+bash scripts/example.sh
 ```
 
 ## Supported methods
