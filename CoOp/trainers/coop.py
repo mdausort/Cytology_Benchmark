@@ -157,6 +157,13 @@ def load_clip_to_cpu(cfg):
 
 class TextEncoder(nn.Module):
     def __init__(self, clip_model):
+        """
+        Initialize the text encoder from the CLIP text backbone.
+        Arg:
+            clip_model: CLIP model containing the text encoder components.
+        Return:
+            None
+        """
         super().__init__()
         self.transformer = clip_model.transformer
         self.positional_embedding = clip_model.positional_embedding
@@ -196,6 +203,15 @@ class TextEncoder(nn.Module):
 
 class PromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
+        """
+        Initialize the prompt learner for the original CLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: CLIP backbone model.
+        Return:
+            None
+        """
         super().__init__()
         n_cls = len(classnames)
         n_ctx = cfg.TRAINER.COOP.N_CTX
@@ -323,9 +339,19 @@ class PromptLearner(nn.Module):
 
 
 class BiomedPromptLearner(nn.Module):
-    def __init__(
-        self, cfg, classnames, biomed_model, hidden_size, tokenizer, word_embeddings
-    ):
+    def __init__(self, cfg, classnames, biomed_model, hidden_size, tokenizer, word_embeddings):
+        """
+        Initialize the prompt learner for BiomedCLIP.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            biomed_model: BiomedCLIP model.
+            hidden_size: text embedding dimension.
+            tokenizer: tokenizer associated with the model.
+            word_embeddings: word embedding layer of the text encoder.
+        Return:
+            None
+        """
         super().__init__()
         device = next(biomed_model.parameters()).device
 
@@ -423,6 +449,16 @@ class BiomedPromptLearner(nn.Module):
 
 class QuiltPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, quilt_model, tokenizer):
+        """
+        Initialize the prompt learner for a Quilt/OpenCLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            quilt_model: Quilt/OpenCLIP backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         n_cls = len(classnames)
 
@@ -514,8 +550,17 @@ class QuiltPromptLearner(nn.Module):
 
 
 class ConchPromptLearner(nn.Module):
-
     def __init__(self, cfg, classnames, conch_model, tokenizer):
+        """
+        Initialize the prompt learner for the Conch model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            conch_model: Conch backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         n_cls = len(classnames)
         self.tokenizer = tokenizer
@@ -612,6 +657,16 @@ class ConchPromptLearner(nn.Module):
 
 class HFPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the prompt learner for a Hugging Face CLIP-based model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Hugging Face CLIP-based model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.tokenizer = tokenizer
         n_cls = len(classnames)
@@ -696,6 +751,15 @@ class HFPromptLearner(nn.Module):
 
 class CustomCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
+        """
+        Initialize the CoOp model based on the original CLIP backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: CLIP backbone model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -734,6 +798,16 @@ class CustomCLIP(nn.Module):
 
 class CustomBiomedCLIP(nn.Module):
     def __init__(self, cfg, classnames, biomed_model, tokenizer):
+        """
+        Initialize the CoOp model based on BiomedCLIP.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            biomed_model: BiomedCLIP backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -819,6 +893,16 @@ class CustomBiomedCLIP(nn.Module):
 
 class CustomQuiltCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the CoOp model based on a Quilt/OpenCLIP backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Quilt/OpenCLIP backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.clip_model = clip_model
         self.prompt_learner = QuiltPromptLearner(cfg, classnames, clip_model, tokenizer)
@@ -889,6 +973,16 @@ class CustomQuiltCLIP(nn.Module):
 
 class CustomConchCLIP(nn.Module):
     def __init__(self, cfg, classnames, conch_model, tokenizer):
+        """
+        Initialize the CoOp model based on the Conch backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            conch_model: Conch backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.clip_model = conch_model
         self.tokenizer = tokenizer
@@ -962,6 +1056,16 @@ class CustomConchCLIP(nn.Module):
 
 class CustomPubMedCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the CoOp model based on a Hugging Face CLIP-based model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Hugging Face CLIP-based backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.clip_model = clip_model
         self.tokenizer = tokenizer

@@ -35,12 +35,29 @@ CUSTOM_TEMPLATES = {
 
 
 def count_params(model: nn.Module):
+    """
+    Count the total number of parameters and the number of trainable parameters.
+    Arg:
+        model: model whose parameters are counted.
+    Return:
+        total: total number of parameters.
+        trainable: number of trainable parameters.
+    """
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total, trainable
 
 
 def count_params_by_module(model: nn.Module, key="prompt_learner"):
+    """
+    Count the total number of parameters and trainable parameters for a specific submodule.
+    Arg:
+        model: model containing the target submodule.
+        key: name of the submodule.
+    Return:
+        total: total number of parameters in the submodule.
+        trainable: number of trainable parameters in the submodule.
+    """
     sub = dict(model.named_modules()).get(key, None)
     if sub is None:
         return None
@@ -51,6 +68,14 @@ def count_params_by_module(model: nn.Module, key="prompt_learner"):
 
 @torch.no_grad()
 def vis_dim_from_encode_image_strict(model, image_size=224):
+    """
+    Infer the visual feature dimension by running the image encoder on a dummy input.
+    Arg:
+        model: model containing an image encoder.
+        image_size: input image size used for the dummy forward pass.
+    Return:
+        d: inferred visual feature dimension.
+    """
     was_training = model.training
     model.eval()
 
@@ -76,6 +101,13 @@ def vis_dim_from_encode_image_strict(model, image_size=224):
 
 
 def load_clip_to_cpu(cfg):
+    """
+    Load the selected CLIP-like backbone on CPU.
+    Arg:
+        cfg: configuration object containing the backbone name.
+    Return:
+        model: loaded backbone model.
+    """
     backbone_name = cfg.MODEL.BACKBONE.NAME
 
     if backbone_name == "BiomedCLIP":
@@ -139,6 +171,9 @@ def load_clip_to_cpu(cfg):
 
 
 class Adapter(nn.Module):
+    """
+    Adapter module used to refine image features with a lightweight bottleneck.
+    """
     def __init__(self, c_in, reduction=4):
         super(Adapter, self).__init__()
         self.fc = nn.Sequential(
@@ -154,8 +189,16 @@ class Adapter(nn.Module):
 
 
 class TextEncoder(nn.Module):
-
     def __init__(self, cfg, classnames, clip_model):
+        """
+        Initialize the text encoder wrapper.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: CLIP backbone model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -163,6 +206,11 @@ class TextEncoder(nn.Module):
         self.dtype = clip_model.dtype
 
     def forward(self):
+        """
+        Build textual prompts from class names and encode them into text features.
+        Return:
+            x: encoded text features.
+        """
         device = next(self.clip_model.parameters()).device
         temp = CUSTOM_TEMPLATES[self.cfg.DATASET.NAME]
         prompts = [temp.format(c.replace("_", " ")) for c in self.classnames]
@@ -175,6 +223,15 @@ class TextEncoder(nn.Module):
 
 class CustomCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
+        """
+        Initialize the CLIP-Adapter model based on the original CLIP backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: CLIP backbone model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -190,9 +247,23 @@ class CustomCLIP(nn.Module):
         self.adapter = Adapter(vis_dim, 4)
 
     def encode_image(self, image):
+        """
+        Encode the input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            image_features: encoded image features.
+        """
         return self.image_encoder(image.type(self.dtype))
 
     def forward(self, image):
+        """
+        Compute classification logits from adapted image features and text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         image_features = self.image_encoder(image.type(self.dtype))
         x = self.adapter(image_features)
 
@@ -221,6 +292,16 @@ class CustomCLIP(nn.Module):
 
 class CustomBiomedCLIP(nn.Module):
     def __init__(self, cfg, classnames, biomed_model, tokenizer):
+        """
+        Initialize the CLIP-Adapter model based on BiomedCLIP.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            biomed_model: BiomedCLIP backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -247,10 +328,24 @@ class CustomBiomedCLIP(nn.Module):
         self.register_buffer("tokenized_prompts", tok, persistent=False)
 
     def encode_image(self, image):
+        """
+        Encode the input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            image_features: encoded image features.
+        """
         dt = next(self.biomed.parameters()).dtype
         return self.biomed.encode_image(image.to(dtype=dt))
 
     def forward(self, image):
+        """
+        Compute classification logits from adapted image features and text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
 
         dt = next(self.biomed.parameters()).dtype
@@ -291,6 +386,16 @@ class CustomBiomedCLIP(nn.Module):
 
 class CustomQuiltCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the CLIP-Adapter model based on a Quilt/OpenCLIP backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Quilt/OpenCLIP backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -315,9 +420,23 @@ class CustomQuiltCLIP(nn.Module):
         self.register_buffer("tokenized_prompts", tok, persistent=False)
 
     def encode_image(self, image):
+        """
+        Encode the input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            image_features: encoded image features.
+        """
         return self.image_encoder(image.to(dtype=self.dtype))
 
     def forward(self, image):
+        """
+        Compute classification logits from adapted image features and text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
         image_features = self.image_encoder(image.type(self.dtype))
         x = self.adapter(image_features)
@@ -350,6 +469,16 @@ class CustomQuiltCLIP(nn.Module):
 
 class CustomPubMedCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the CLIP-Adapter model based on a Hugging Face CLIP-based model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Hugging Face CLIP-based backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -376,11 +505,25 @@ class CustomPubMedCLIP(nn.Module):
         self.register_buffer("attention_mask", tok["attention_mask"], persistent=False)
 
     def encode_image(self, image):
+        """
+        Encode the input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            image_features: encoded image features.
+        """
         return self.clip_model.get_image_features(
             pixel_values=image.to(dtype=self.vision_dtype)
         )
 
     def forward(self, image):
+        """
+        Compute classification logits from adapted image features and text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
         image_features = self.clip_model.get_image_features(
             pixel_values=image.to(dtype=self.vision_dtype)
@@ -423,6 +566,16 @@ class CustomPubMedCLIP(nn.Module):
 
 class CustomConchCLIP(nn.Module):
     def __init__(self, cfg, classnames, conch_model, tokenizer):
+        """
+        Initialize the CLIP-Adapter model based on the Conch backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            conch_model: Conch backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -458,9 +611,23 @@ class CustomConchCLIP(nn.Module):
         self.register_buffer("tokenized_prompts", tok, persistent=False)
 
     def encode_image(self, image):
+        """
+        Encode the input images into visual features.
+        Arg:
+            image: input image batch.
+        Return:
+            image_features: encoded image features.
+        """
         return self.image_encoder(image.to(dtype=self.dtype))
 
     def forward(self, image):
+        """
+        Compute classification logits from adapted image features and text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
         image_features = self.image_encoder(image.type(self.dtype))
         x = self.adapter(image_features.float()).to(image_features.dtype)
