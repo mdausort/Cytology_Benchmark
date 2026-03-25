@@ -72,12 +72,6 @@ pip install -r requirements.txt
 ## Datasets
 
 We evaluate on 10 public cytological datasets covering multiple organs and classification tasks.
-
-See `DATASETS.md` for:
-- download links
-- preprocessing details
-- dataset structure
-
 | Dataset        | 🔗 Download Link                                                                                        |
 | -------------- | -------------------------------------------------------------------------------------------------------- |
 | APACC          | [📥 Link](https://osf.io/fp2xe/overview)                                                                |
@@ -90,6 +84,11 @@ See `DATASETS.md` for:
 | HiCervix       | [📥 Link](https://zenodo.org/records/11087263)                                                          |
 | MLCC           | [📥 Link](https://www.kaggle.com/datasets/blank1508/mendeley-lbc-cervical-cancer-)                      |
 | SIPaKMeD       | [📥 Link](https://www.kaggle.com/datasets/prahladmehandiratta/cervical-cancer-largest-dataset-sipakmed) |
+
+See `DATASETS.md` for:
+- download links
+- preprocessing details
+- dataset structure
 
 ## Running experiments
 
