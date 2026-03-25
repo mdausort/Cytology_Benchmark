@@ -2,11 +2,35 @@
 
 **Currently being updated**
 
-## Contents 
+This repository provides a unified benchmark for fine-tuning foundation models on cytological image classification tasks.
 
+It integrates and extends several existing open-source repositories, including prompt learning and adaptation frameworks such as CoOp, KgCoOp, PromptSRC, TaskRes, Tip-Adapter, and related projects. These submodules were originally developed in separate public GitHub repositories and were adapted here to support additional foundation models, cytology-specific datasets, and a unified experimental pipeline.
+
+The main goal of this repository is to provide a common framework for comparing different adaptation strategies across multiple cytological image classification benchmarks.
+
+## Contents
+
+- [Repository Structure](#repository-structure)
 - [Installation](#installation)
+- [Datasets](#datasets)
 - [Usage](#usage)
+- [Original Repositories](#original-repositories)
 - [Contact](#contact)
+
+## Repository Structure
+
+```bash
+Cytology_Benchmark/
+├── CoOp/
+├── Cytology-fine-tuning/
+├── KgCoOp/
+├── multimodal-prompt-learning/
+├── Prompt-align/
+├── TaskRes/
+├── Tip-Adapter/
+├── DATASETS.md
+├── README.md
+└── LICENSE
 
 ## Installation 
 
