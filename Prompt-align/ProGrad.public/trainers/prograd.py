@@ -36,16 +36,14 @@ CUSTOM_TEMPLATES = {
 }
 
 
-def is_openclip(backbone_name: str):
-    return backbone_name in ["Quilt-B/32", "Quilt-B/16", "BiomedCLIP", "Conch"]
-
-
-def is_hf_clip(backbone_name: str):
-    return backbone_name in ["PubMedCLIP-B/32", "PLIP-B/32"]
-
-
 def _as_input_ids(tokens):
-
+    """
+    Convert tokenized outputs to a tensor of input ids.
+    Arg:
+        tokens: tokenized outputs in tensor, dict, or tokenizer-specific format.
+    Return:
+        input_ids: token ids as a tensor.
+    """
     if isinstance(tokens, dict):
         tokens = tokens.get("input_ids", list(tokens.values())[0])
     if hasattr(tokens, "input_ids"):
@@ -53,13 +51,27 @@ def _as_input_ids(tokens):
     return torch.as_tensor(tokens, dtype=torch.long)
 
 
-def _vision_dtype_from_module(vision: torch.nn.Module) -> torch.dtype:
+def _vision_dtype_from_module(vision):
+    """
+    Convert tokenized outputs to a tensor of input ids.
+    Arg:
+        tokens: tokenized outputs in tensor, dict, or tokenizer-specific format.
+    Return:
+        input_ids: token ids as a tensor.
+    """
     if hasattr(vision, "conv1") and hasattr(vision.conv1, "weight"):
         return vision.conv1.weight.dtype
     return next(vision.parameters()).dtype
 
 
 def _get_openclip_token_embedding(model):
+    """
+    Retrieve the dtype used by the vision encoder.
+    Arg:
+        vision: vision encoder module.
+    Return:
+        dtype: dtype of the vision module parameters.
+    """
     if hasattr(model, "token_embedding"):
         return model.token_embedding
     if hasattr(model, "text") and hasattr(model.text, "token_embedding"):
@@ -74,6 +86,13 @@ def _get_openclip_token_embedding(model):
 
 
 def load_clip_to_cpu(cfg):
+    """
+    Load the selected CLIP-like backbone on CPU.
+    Arg:
+        cfg: configuration object containing the backbone name.
+    Return:
+        model: loaded backbone model.
+    """
     backbone_name = cfg.MODEL.BACKBONE.NAME
 
     if backbone_name == "BiomedCLIP":
@@ -136,40 +155,16 @@ def load_clip_to_cpu(cfg):
     return model
 
 
-def get_openclip_tokenizer_for_conch(clip_model):
-    if hasattr(conch.open_clip_custom, "get_tokenizer"):
-        try:
-            return conch.open_clip_custom.get_tokenizer()
-        except TypeError:
-            pass
-
-    if hasattr(conch.open_clip_custom, "tokenize"):
-        fn = conch.open_clip_custom.tokenize
-
-        def _wrapped(texts):
-            try:
-                return fn(texts)
-            except TypeError:
-                pass
-            try:
-                return fn(clip_model, texts)
-            except TypeError:
-                pass
-            tok_obj = getattr(clip_model, "tokenizer", None)
-            if tok_obj is not None:
-                try:
-                    return fn(tok_obj, texts)
-                except TypeError:
-                    pass
-            raise TypeError(f"Unsupported Conch tokenize signature: {fn}")
-
-        return _wrapped
-
-    return get_tokenizer("ViT-B-16")
-
-
 def _get_input_ids(tokenized, pad_id=0, max_len=77):
-
+    """
+    Extract and format input ids from various tokenized representations.
+    Arg:
+        tokenized: tokenized outputs in tensor, dict, list, or tokenizer-specific format.
+        pad_id: padding token id.
+        max_len: target sequence length.
+    Return:
+        ids: token ids tensor of shape (batch_size, max_len).
+    """
     if torch.is_tensor(tokenized):
         ids = tokenized
         if ids.dim() == 1:
@@ -218,6 +213,13 @@ def _get_input_ids(tokenized, pad_id=0, max_len=77):
 
 class TextEncoder(nn.Module):
     def __init__(self, clip_model):
+        """
+        Initialize the text encoder from the CLIP model.
+        Arg:
+            clip_model: CLIP model containing the text encoder components.
+        Return:
+            None
+        """
         super().__init__()
         self.transformer = clip_model.transformer
         self.positional_embedding = clip_model.positional_embedding
@@ -226,6 +228,14 @@ class TextEncoder(nn.Module):
         self.dtype = clip_model.dtype
 
     def forward(self, prompts, tokenized_prompts):
+        """
+        Encode prompt embeddings into text features.
+        Arg:
+            prompts: embedded prompt tokens.
+            tokenized_prompts: tokenized prompts used to identify the end-of-text token.
+        Return:
+            x: encoded text features.
+        """
         tr_dtype = next(self.transformer.parameters()).dtype
         prompts = prompts.to(dtype=tr_dtype)
         pos = self.positional_embedding.to(dtype=tr_dtype)
@@ -249,6 +259,15 @@ class TextEncoder(nn.Module):
 
 class PromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
+        """
+        Initialize the prompt learner for the original CLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: CLIP backbone model.
+        Return:
+            None
+        """
         super().__init__()
         n_cls = len(classnames)
         n_ctx = cfg.TRAINER.COOP.N_CTX
@@ -316,6 +335,11 @@ class PromptLearner(nn.Module):
         self.name_lens = name_lens
 
     def forward(self):
+        """
+        Build the complete prompts by combining prefix, learnable context, and suffix tokens.
+        Return:
+            prompts: prompt embeddings for all classes.
+        """
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
@@ -386,6 +410,18 @@ class BiomedPromptLearner(nn.Module):
     def __init__(
         self, cfg, classnames, biomed_model, hidden_size, tokenizer, word_embeddings
     ):
+        """
+        Initialize the prompt learner for BiomedCLIP.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            biomed_model: BiomedCLIP model.
+            hidden_size: text embedding dimension.
+            tokenizer: tokenizer associated with the model.
+            word_embeddings: word embedding layer of the text encoder.
+        Return:
+            None
+        """
         super().__init__()
         device = next(biomed_model.parameters()).device
 
@@ -459,6 +495,15 @@ class BiomedPromptLearner(nn.Module):
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def forward(self, batch_size, device, dtype):
+        """
+        Build the complete prompts by combining prefix, learnable context, and suffix tokens.
+        Arg:
+            batch_size: number of prompt sets to generate.
+            device: target device.
+            dtype: target dtype.
+        Return:
+            prompts: prompt embeddings.
+        """
         ctx = self.ctx.to(device=device, dtype=dtype)
 
         if ctx.dim() == 2:
@@ -484,6 +529,16 @@ class BiomedPromptLearner(nn.Module):
 
 class QuiltPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, quilt_model, tokenizer):
+        """
+        Initialize the prompt learner for a Quilt/OpenCLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            quilt_model: Quilt/OpenCLIP backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         n_cls = len(classnames)
         n_ctx = cfg.TRAINER.COOP.N_CTX
@@ -568,6 +623,12 @@ class QuiltPromptLearner(nn.Module):
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def forward(self):
+        """
+        Build the complete prompts by combining prefix, learnable context,
+        and suffix tokens.
+        Return:
+            prompts: prompt embeddings for all classes.
+        """
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
@@ -589,6 +650,16 @@ class QuiltPromptLearner(nn.Module):
 
 class ConchPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, conch_model, tokenizer):
+        """
+        Initialize the prompt learner for the Conch model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            conch_model: Conch backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         n_cls = len(classnames)
         self.tokenizer = tokenizer
@@ -671,6 +742,12 @@ class ConchPromptLearner(nn.Module):
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def forward(self):
+        """
+        Build the complete prompts by combining prefix, learnable context,
+        and suffix tokens.
+        Return:
+            prompts: prompt embeddings for all classes.
+        """
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
@@ -684,6 +761,16 @@ class ConchPromptLearner(nn.Module):
 
 class HFPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the prompt learner for a Hugging Face CLIP-based model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Hugging Face CLIP-based model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -765,6 +852,12 @@ class HFPromptLearner(nn.Module):
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
 
     def forward(self):
+        """
+        Build the complete prompts by combining prefix, learnable context,
+        and suffix tokens.
+        Return:
+            prompts: prompt embeddings for all classes.
+        """
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
@@ -776,6 +869,14 @@ class HFPromptLearner(nn.Module):
 
 class CLIP_ZS(nn.Module):
     def __init__(self, cfg, classnames):
+        """
+        Initialize the zero-shot CLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+        Return:
+            None
+        """
         super().__init__()
         print(f"Loading CLIP (backbone: {cfg.MODEL.BACKBONE.NAME})")
         clip_model = load_clip_to_cpu(cfg)
@@ -794,6 +895,13 @@ class CLIP_ZS(nn.Module):
         self.clip_model = clip_model
 
     def forward(self, image):
+        """
+        Compute zero-shot classification logits from image and text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         image_features = self.clip_model.encode_image(image)
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         logit_scale = self.clip_model.logit_scale.exp()
@@ -806,6 +914,15 @@ class CLIP_ZS(nn.Module):
 
 class BiomedCLIP_ZS(nn.Module):
     def __init__(self, cfg, classnames, tokenizer):
+        """
+        Initialize the zero-shot BiomedCLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         print("Loading BiomedCLIP (open_clip)")
 
@@ -833,6 +950,13 @@ class BiomedCLIP_ZS(nn.Module):
         self.tokenizer = tokenizer
 
     def forward(self, image):
+        """
+        Compute zero-shot classification logits from image and text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
         dt = next(self.clip_model.parameters()).dtype
 
@@ -852,6 +976,15 @@ class BiomedCLIP_ZS(nn.Module):
 
 class QuiltCLIP_ZS(nn.Module):
     def __init__(self, cfg, classnames, tokenizer):
+        """
+        Initialize the zero-shot BiomedCLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
 
         print(f"Loading Quilt (open_clip): {cfg.MODEL.BACKBONE.NAME}")
@@ -873,6 +1006,13 @@ class QuiltCLIP_ZS(nn.Module):
         self.tokenizer = tokenizer
 
     def forward(self, image):
+        """
+        Compute zero-shot classification logits from image and text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
         dt = next(self.clip_model.parameters()).dtype
 
@@ -891,6 +1031,15 @@ class QuiltCLIP_ZS(nn.Module):
 
 class ConchCLIP_ZS(nn.Module):
     def __init__(self, cfg, classnames, tokenizer):
+        """
+        Initialize the zero-shot Conch model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         print("Loading Conch (open_clip_custom)")
 
@@ -919,6 +1068,13 @@ class ConchCLIP_ZS(nn.Module):
         self.tokenizer = tokenizer
 
     def forward(self, image):
+        """
+        Compute zero-shot classification logits from image and text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
         dt = next(self.clip_model.parameters()).dtype
 
@@ -937,6 +1093,15 @@ class ConchCLIP_ZS(nn.Module):
 
 class PubMedCLIP_ZS(nn.Module):
     def __init__(self, cfg, classnames, tokenizer):
+        """
+        Initialize the zero-shot Quilt/OpenCLIP model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         print("Loading PubMedCLIP (HF)")
 
@@ -970,8 +1135,14 @@ class PubMedCLIP_ZS(nn.Module):
         self.register_buffer("text_features", tf, persistent=False)
         self.vision_dtype = next(self.clip_model.vision_model.parameters()).dtype
 
-    @torch.no_grad()
     def forward(self, image):
+        """
+        Compute zero-shot classification logits from image and text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
 
         image_features = self.clip_model.get_image_features(
@@ -992,6 +1163,15 @@ class PubMedCLIP_ZS(nn.Module):
 
 class CustomCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
+        """
+        Initialize the zero-shot Hugging Face CLIP-based model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -1003,6 +1183,13 @@ class CustomCLIP(nn.Module):
         self.logit_scale = clip_model.logit_scale
 
     def forward(self, image):
+        """
+        Compute classification logits from image features and prompted text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         vision_dtype = _vision_dtype_from_module(self.image_encoder)
         image_features = self.image_encoder(image.to(dtype=vision_dtype))
 
@@ -1023,6 +1210,16 @@ class CustomCLIP(nn.Module):
 
 class CustomBiomedCLIP(nn.Module):
     def __init__(self, cfg, classnames, biomed_model, tokenizer):
+        """
+        Initialize the ProGrad model based on BiomedCLIP.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            biomed_model: BiomedCLIP backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.cfg = cfg
         self.classnames = classnames
@@ -1043,7 +1240,14 @@ class CustomBiomedCLIP(nn.Module):
         self.tokenized_prompts = self.prompt_learner.tokenized_prompts
         self.logit_scale = getattr(self.biomed, "logit_scale", None)
 
-    def encode_text_with_ctx(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def encode_text_with_ctx(self, input_ids):
+        """
+        Encode text while injecting the learnable context into the token embeddings.
+        Arg:
+            input_ids: tokenized text inputs.
+        Return:
+            tf: encoded text features.
+        """
         device = input_ids.device
         we = self.word_embeddings
 
@@ -1068,6 +1272,13 @@ class CustomBiomedCLIP(nn.Module):
         return tf
 
     def forward(self, image):
+        """
+        Compute classification logits from image features and prompted text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
 
         vision_dtype = _vision_dtype_from_module(self.vision)
@@ -1094,6 +1305,16 @@ class CustomBiomedCLIP(nn.Module):
 
 class CustomQuiltCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the ProGrad model based on a Quilt/OpenCLIP backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Quilt/OpenCLIP backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.clip_model = clip_model
         self.prompt_learner = QuiltPromptLearner(cfg, classnames, clip_model, tokenizer)
@@ -1104,7 +1325,14 @@ class CustomQuiltCLIP(nn.Module):
         self.dtype = next(self.image_encoder.parameters()).dtype
 
     def encode_text_with_ctx(self, tokenized_prompts):
-
+        """
+        Encode tokenized prompts while replacing the context token embeddings
+        with the learnable prompt vectors.
+        Arg:
+            tokenized_prompts: tokenized prompts.
+        Return:
+            text_features: encoded text features.
+        """
         te = _get_openclip_token_embedding(self.clip_model)
         ctx = self.prompt_learner.ctx
         if ctx.dim() == 2:
@@ -1131,6 +1359,13 @@ class CustomQuiltCLIP(nn.Module):
             h.remove()
 
     def forward(self, image):
+        """
+        Compute classification logits from image features and prompted text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
         image_features = self.image_encoder(image.to(dtype=self.dtype))
 
@@ -1151,6 +1386,16 @@ class CustomQuiltCLIP(nn.Module):
 
 class CustomConchCLIP(nn.Module):
     def __init__(self, cfg, classnames, conch_model, tokenizer):
+        """
+        Initialize the ProGrad model based on the Conch backbone.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            conch_model: Conch backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.clip_model = conch_model
         self.tokenizer = tokenizer
@@ -1162,6 +1407,14 @@ class CustomConchCLIP(nn.Module):
         self.dtype = next(self.clip_model.parameters()).dtype
 
     def encode_text_with_ctx(self, tokenized_prompts):
+        """
+        Encode tokenized prompts while replacing the context token embeddings
+        with the learnable prompt vectors.
+        Arg:
+            tokenized_prompts: tokenized prompts.
+        Return:
+            text_features: encoded text features.
+        """
         te = _get_openclip_token_embedding(self.clip_model)
         ctx = self.prompt_learner.ctx
         if ctx.dim() == 2:
@@ -1187,6 +1440,13 @@ class CustomConchCLIP(nn.Module):
             h.remove()
 
     def forward(self, image):
+        """
+        Compute classification logits from image features and prompted text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
         image_features = self.clip_model.encode_image(image.to(dtype=self.dtype))
 
@@ -1210,6 +1470,16 @@ class CustomConchCLIP(nn.Module):
 
 class CustomPubMedCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model, tokenizer):
+        """
+        Initialize the ProGrad model based on a Hugging Face CLIP-based model.
+        Arg:
+            cfg: configuration object.
+            classnames: list of class names.
+            clip_model: Hugging Face CLIP-based backbone model.
+            tokenizer: tokenizer associated with the model.
+        Return:
+            None
+        """
         super().__init__()
         self.model = clip_model
         self.tokenizer = tokenizer
@@ -1220,6 +1490,13 @@ class CustomPubMedCLIP(nn.Module):
         self.token_embedding = clip_model.text_model.embeddings.token_embedding
 
     def forward(self, image):
+        """
+        Compute classification logits from image features and prompted text features.
+        Arg:
+            image: input image batch.
+        Return:
+            logits: similarity scores between image and text features.
+        """
         device = image.device
 
         vision_dtype = next(self.model.vision_model.parameters()).dtype
