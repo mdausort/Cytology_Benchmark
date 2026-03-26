@@ -117,6 +117,7 @@ bash scripts/launch_run.sh or scripts/main_ivlp.sh
 - CoOp / CoCoOp / KgCoOp / ProGrad
 - Tip-Adapter / TaskRes
 - VPT (Visual Prompt Tuning)
+- TPT (Textual Prompt Tuning)
 - IVLP (Independant Visual Language Prompting)
 
 All methods are adapted to work with multiple backbones as BiomedCLIP, PLIP, PubMedCLIP, QUILT and CONCH for VLM or DinoBLOOM and UNI for ViT.
