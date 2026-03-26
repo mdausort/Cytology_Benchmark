@@ -51,23 +51,17 @@ Each submodule originates from a different repository and has been adapted for:
 | Cytology-fine-tuning       | [📥 Link](https://github.com/mdausort/Cytology-fine-tuning)                       |
 
 ## Environments
+
 Two Python environments are used:
 
 ### 1. dassl
-Base environment for most experiments.
+For CoOp, multimodal-prompt-learning, TaskRes, Tip-Adapter and Cytology-fine-tuning; we use the dassl environment. 
+This code is built on top of the awesome toolbox [Dassl.pytorch](https://github.com/KaiyangZhou/Dassl.pytorch) so you need to install the dassl environment first. Simply follow the instructions described here to install dassl as well as PyTorch. 
+After that, `run pip install -r requirements.txt` under `Cytology_Benchmark/` to install a few more packages required (this should be done when dassl is activated). Then, you are ready to go.
 
 ### 2. dassl_prograd
-Extended version including additional prompt-learning methods (e.g., ProGrad).
-
-Both environments have been modified and require the provided `requirements.txt`.
-
-We recommend using conda:
-
-```bash
-conda create -n cytology python=3.10
-conda activate cytology
-pip install -r requirements.txt
-```
+For Prompt-align and KgCoOp, we use dassl_pro environment. This code is built on top of the toolbox [Dassl.ProGrad.pytorch](https://github.com/BeierZhu/Prompt-align/tree/main/Dassl.ProGrad.pytorch). 
+After that, `run pip install -r requirements.txt` under `Cytology_Benchmark/` to install a few more packages required (this should be done when dassl is activated). Then, you are ready to go.
 
 ## Datasets
 
