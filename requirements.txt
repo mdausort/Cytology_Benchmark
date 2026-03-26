@@ -1,0 +1,23 @@
+conch @ git+https://github.com/Mahmoodlab/CONCH.git@141cc09c7d4ff33d8eda562bd75169b457f71a62
+flake8==3.7.9
+ftfy
+future
+gdown
+huggingface-hub==0.36.0
+isort==4.3.21
+open_clip_torch==3.2.0
+pytorch-warmup==0.2.0
+regex
+safetensors==0.7.0
+scikit-learn
+scipy
+tabulate
+tb-nightly
+timm==1.0.22
+tokenizers==0.22.1
+tqdm
+transformers==4.57.3
+triton==3.5.1
+wilds==1.2.2
+yacs
+yapf==0.29.0
